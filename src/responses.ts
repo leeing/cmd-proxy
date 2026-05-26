@@ -226,7 +226,7 @@ function commandCodeToolSchema(name: string, schema: unknown): unknown {
         patch: {
           type: "string",
           description:
-            "A Codex apply_patch patch. It must start with '*** Begin Patch' and end with '*** End Patch'. Use only *** Add File, *** Delete File, or *** Update File hunks.",
+            "A unified diff patch to apply. Use standard unified diff format with ---/+++ file headers and @@ hunk markers with context lines. Lines starting with space are context, + are additions, - are deletions.",
         },
       },
       required: ["patch"],
@@ -238,10 +238,11 @@ function commandCodeToolSchema(name: string, schema: unknown): unknown {
 function applyPatchDescription(name: string): string | undefined {
   if (!isCustomToolName(name)) return undefined
   return [
-    "Apply a Codex patch to edit files.",
-    "The patch string must be exactly in Codex apply_patch format.",
-    "For new files, use: *** Begin Patch, *** Add File: path, +lines, *** End Patch.",
-    "Do not use unified diff headers such as ---/+++ or @@ ranges.",
+    "Apply a unified diff patch to edit files.",
+    "Use standard unified diff format: --- a/file, +++ b/file headers,",
+    "@@ -start,count +start,count @@ hunk markers with 3 lines of context.",
+    "Lines: space-prefixed = context, +prefixed = addition, -prefixed = deletion.",
+    "Example: --- a/foo.ts\n+++ b/foo.ts\n@@ -1,3 +1,4 @@\n context\n+new line\n context",
   ].join(" ")
 }
 
