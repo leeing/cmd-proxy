@@ -16,6 +16,13 @@ import {
   parseCommandCodeStreamRemainder,
 } from "./command-code-stream.ts"
 import type { AppConfig } from "./config.ts"
+import {
+  type AnthropicMessageRequest,
+  type AnthropicSseEvent,
+  anthropicMessagesFromCommandCodeEvents,
+  convertAnthropicRequestToCommandCode,
+  createAnthropicMessagesStreamTranslator,
+} from "./messages.ts"
 import { modelList } from "./models.ts"
 import {
   convertResponsesRequestToCommandCode,
@@ -89,6 +96,11 @@ async function handleRequest(
 
   if (req.method === "POST" && (url === "/chat/completions" || url === "/v1/chat/completions")) {
     await handleChatCompletions(req, res, config, logger, fetchImpl)
+    return
+  }
+
+  if (req.method === "POST" && (url === "/messages" || url === "/v1/messages")) {
+    await handleMessages(req, res, config, logger, fetchImpl)
     return
   }
 
@@ -388,8 +400,13 @@ async function streamCommandCodeToChatCompletions(
   for (const chunk of translator.finish()) writeChatCompletionChunk(res, chunk)
 }
 
-function sendJson(res: ServerResponse, status: number, value: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json", ...corsHeaders() })
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  value: unknown,
+  extraHeaders: Record<string, string> = {},
+): void {
+  res.writeHead(status, { "Content-Type": "application/json", ...corsHeaders(), ...extraHeaders })
   res.end(JSON.stringify(value))
 }
 
@@ -399,6 +416,132 @@ function sendOpenAiError(
   error: { message: string; type: string; code: string },
 ): void {
   sendJson(res, status, { error: { ...error, param: null } })
+}
+
+async function handleMessages(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: AppConfig,
+  logger: Logger,
+  fetchImpl: typeof fetch,
+): Promise<void> {
+  const request = await readJsonBody(req)
+  if (!isRecord(request)) {
+    sendAnthropicError(res, 400, {
+      type: "invalid_request_error",
+      message: "Request body must be a JSON object",
+    })
+    return
+  }
+
+  // Anthropic requires request header anthropic-version
+  const anthropicVersion = req.headers["anthropic-version"] ?? "2023-06-01"
+
+  const messagesRequest = request as AnthropicMessageRequest
+  const commandCodePayload = convertAnthropicRequestToCommandCode(messagesRequest)
+  const upstream = await fetchCommandCode(req, config, fetchImpl, commandCodePayload)
+
+  if (!upstream.ok) {
+    await sendUpstreamAnthropicError(upstream, res, logger)
+    return
+  }
+
+  if (messagesRequest.stream !== false) {
+    sendAnthropicSseHeaders(res)
+    await streamCommandCodeToMessages(upstream, res, messagesRequest.model)
+    res.end()
+  } else {
+    const commandCodeEvents = await readCommandCodeEvents(upstream)
+    const response = anthropicMessagesFromCommandCodeEvents(commandCodeEvents, {
+      ...(messagesRequest.model ? { model: messagesRequest.model } : {}),
+    })
+    res.setHeader("x-api-key", req.headers["x-api-key"] ?? "")
+    sendJson(res, 200, response, { "anthropic-version": String(anthropicVersion) })
+  }
+}
+
+async function streamCommandCodeToMessages(
+  response: Response,
+  res: ServerResponse,
+  model: string | undefined,
+): Promise<void> {
+  const reader = response.body?.getReader()
+  if (!reader) {
+    createAnthropicMessagesStreamTranslator().finish()
+    return
+  }
+
+  const translator = createAnthropicMessagesStreamTranslator({
+    ...(model ? { model } : {}),
+  })
+  const decoder = new TextDecoder()
+  let buffer = ""
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const parsed = parseCommandCodeStreamChunk(decoder.decode(value, { stream: true }), buffer)
+    buffer = parsed.buffer
+    for (const commandCodeEvent of parsed.events) {
+      for (const sseEvent of translator.push(commandCodeEvent)) {
+        writeAnthropicSseEvent(res, sseEvent)
+      }
+    }
+  }
+
+  for (const commandCodeEvent of parseCommandCodeStreamRemainder(buffer)) {
+    for (const sseEvent of translator.push(commandCodeEvent)) {
+      writeAnthropicSseEvent(res, sseEvent)
+    }
+  }
+
+  translator.finish()
+}
+
+function sendAnthropicError(
+  res: ServerResponse,
+  status: number,
+  error: { type: string; message: string },
+): void {
+  sendJson(res, status, { type: "error", error }, { "anthropic-version": "2023-06-01" })
+}
+
+async function sendUpstreamAnthropicError(
+  upstream: Response,
+  res: ServerResponse,
+  logger: Logger,
+): Promise<void> {
+  const body = await upstream.text().catch((error: unknown) => errorMessage(error))
+  logger.warn(
+    { status: upstream.status, body: body.slice(0, 500) },
+    "Command Code upstream error (Messages)",
+  )
+  sendAnthropicError(res, upstream.status, {
+    type: anthropicErrorType(upstream.status),
+    message: `Command Code API error ${upstream.status}: ${body.slice(0, 500)}`,
+  })
+}
+
+function anthropicErrorType(status: number): string {
+  if (status === 401 || status === 403) return "authentication_error"
+  if (status === 429) return "rate_limit_error"
+  if (status >= 500) return "server_error"
+  return "invalid_request_error"
+}
+
+function writeAnthropicSseEvent(res: ServerResponse, event: AnthropicSseEvent): void {
+  res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+}
+
+function sendAnthropicSseHeaders(res: ServerResponse): void {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+    ...corsHeaders(),
+  })
+  res.flushHeaders()
 }
 
 function sendSseHeaders(res: ServerResponse): void {

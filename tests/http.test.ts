@@ -44,7 +44,11 @@ async function sseEvents(response: Response): Promise<unknown[]> {
   return text
     .split("\n\n")
     .filter(Boolean)
-    .map((frame) => frame.replace(/^data: /, ""))
+    .flatMap((frame) => {
+      const lines = frame.split("\n").filter(Boolean)
+      const dataLine = lines.find((line) => line.startsWith("data: "))
+      return dataLine ? [dataLine.slice(6)] : []
+    })
     .filter((data) => data !== "[DONE]")
     .map((data) => JSON.parse(data) as unknown)
 }
@@ -193,5 +197,108 @@ describe("createProxyServer", () => {
       })
     }
     expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it("streams Messages API events over HTTP SSE", async () => {
+    const fetchImpl = vi.fn(async () =>
+      commandCodeResponse([
+        JSON.stringify({ type: "text-delta", text: "hello" }),
+        JSON.stringify({
+          type: "finish",
+          finishReason: "stop",
+          totalUsage: { inputTokens: 5, outputTokens: 3 },
+        }),
+      ]),
+    ) as typeof fetch
+    const baseUrl = await startProxy(fetchImpl)
+
+    const response = await fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer client_dummy",
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 4096,
+        stream: true,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toContain("text/event-stream")
+    const events = await sseEvents(response)
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "message_start" }),
+        expect.objectContaining({ type: "content_block_delta" }),
+        expect.objectContaining({ type: "content_block_stop" }),
+        expect.objectContaining({ type: "message_delta" }),
+        expect.objectContaining({ type: "message_stop" }),
+      ]),
+    )
+  })
+
+  it("returns non-streaming Messages response over HTTP", async () => {
+    const fetchImpl = vi.fn(async () =>
+      commandCodeResponse([
+        JSON.stringify({ type: "text-delta", text: "hello" }),
+        JSON.stringify({
+          type: "finish",
+          finishReason: "stop",
+          totalUsage: { inputTokens: 10, outputTokens: 5 },
+        }),
+      ]),
+    ) as typeof fetch
+    const baseUrl = await startProxy(fetchImpl)
+
+    const response = await fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 4096,
+        stream: false,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(body).toMatchObject({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: "hello" }],
+    })
+  })
+
+  it("maps Messages upstream errors to Anthropic error format", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("unauthorized", { status: 401 }),
+    ) as typeof fetch
+    const baseUrl = await startProxy(fetchImpl)
+
+    const response = await fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 4096,
+      }),
+    })
+
+    expect(response.status).toBe(401)
+    expect(await response.json()).toMatchObject({
+      type: "error",
+      error: {
+        type: "authentication_error",
+      },
+    })
   })
 })
