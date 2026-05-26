@@ -2,22 +2,23 @@
 
 `cmd-proxy` 是一个本地协议转换代理，用来把 OpenAI 兼容客户端的请求转换到 Command Code API。
 
-当前重点是兼容 Codex 使用的 OpenAI Responses API，同时也提供 Chat Completions API，方便其他 OpenAI 兼容工具接入。
+同时提供 OpenAI Responses API、Chat Completions API 和 Anthropic Messages API 三种协议，方便各类兼容工具接入。
 
 ## 架构
 
 ```text
-Codex / OpenAI-compatible client
+Codex / OpenAI / Anthropic client
   -> http://localhost:8888/v1/responses
   -> http://localhost:8888/v1/chat/completions
+  -> http://localhost:8888/v1/messages
       |
       v
 cmd-proxy
   - 校验环境变量
-  - 解析 OpenAI 请求
+  - 解析请求（OpenAI / Anthropic）
   - 转换为 Command Code 请求
   - 读取 Command Code 流式事件
-  - 转换回 OpenAI SSE / JSON 响应
+  - 转换回对应协议的 SSE / JSON 响应
       |
       v
 Command Code API
@@ -34,6 +35,7 @@ DeepSeek / Claude / GPT / other CC routed models
 - `src/http.ts`：HTTP 路由、CORS、上游请求、SSE 写回。
 - `src/responses.ts`：OpenAI Responses API 与 Command Code 格式互转。
 - `src/chat-completions.ts`：OpenAI Chat Completions API 与 Command Code 格式互转。
+- `src/messages.ts`：Anthropic Messages API 与 Command Code 格式互转。
 - `src/command-code-stream.ts`：解析 Command Code 返回的 JSON line / SSE line 流。
 - `src/models.ts`：本地模型别名到 Command Code 模型 ID 的映射。
 
@@ -70,18 +72,21 @@ POST /alpha/generate
 1. **请求转换**
    - Responses API：把 `input`、`instructions`、`tools` 转成 CC 的 `messages`、`system`、`tools`。
    - Chat Completions：把 `messages`、`tools` 转成 CC 的 `messages`、`system`、`tools`。
+   - Anthropic Messages：把 `system`、`messages`、`tools`、`tool_choice` 转成 CC 格式。
    - 保留 `temperature`、`top_p`、`stop`、`tool_choice`、`parallel_tool_calls` 等参数。
 
 2. **工具调用转换**
    - OpenAI `function_call` / `tool_calls` 转成 CC `tool-call`。
+   - Anthropic `tool_use` 转成 CC `tool-call`。
    - OpenAI `function_call_output` / `tool` message 转成 CC `tool-result`。
+   - Anthropic `tool_result` 转成 CC `tool-result`（含 `is_error` 映射）。
    - 当工具结果缺少工具名时，用历史 `call_id -> toolName` 映射补齐。
 
 3. **流式响应转换**
-   - CC `text-delta` 转成 OpenAI 文本 delta。
-   - CC `tool-input-start/delta/end` 转成 OpenAI 工具参数增量。
-   - CC `finish.totalUsage` 转成 OpenAI usage。
-   - CC `reasoning-delta` 默认不混入正文，避免 Codex 把思考过程当作最终回答显示。
+   - CC `text-delta` 转成各协议文本 delta。
+   - CC `tool-input-start/delta/end` 转成各协议工具参数增量。
+   - CC `finish.totalUsage` 转成各协议 usage。
+   - CC `reasoning-delta` 默认不混入正文，避免客户端把思考过程当作最终回答显示。
 
 ## 支持的端点
 
@@ -91,6 +96,8 @@ POST /v1/responses
 POST /responses
 POST /v1/chat/completions
 POST /chat/completions
+POST /v1/messages
+POST /messages
 ```
 
 ## 环境要求
@@ -176,6 +183,24 @@ curl http://localhost:8888/v1/responses \
   }'
 ```
 
+## Anthropic Messages API 用法
+
+```bash
+curl http://localhost:8888/v1/messages \
+  -H "Authorization: Bearer user_..." \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "system": "You are a helpful assistant.",
+    "messages": [
+      { "role": "user", "content": "Say hi in one sentence." }
+    ],
+    "max_tokens": 4096,
+    "stream": false
+  }'
+```
+
 ## 开发
 
 ```bash
@@ -186,17 +211,15 @@ pnpm test
 
 当前测试覆盖：
 
-- Responses 请求转换
-- Responses 流式事件转换
-- Chat Completions 请求转换
-- Chat Completions 流式和非流式聚合
+- Responses 请求转换 + 流式事件转换
+- Chat Completions 请求转换 + 流式和非流式聚合
+- Anthropic Messages 请求转换 + 流式和非流式聚合
 - HTTP 路由、SSE 输出、错误格式、认证模式
 - Command Code 流解析
 - 环境变量校验
 
 ## 当前限制
 
-- Anthropic Messages API (`/v1/messages`) 尚未实现。
 - WebSocket 端点尚未实现。
 - `reasoning-delta` 目前默认隐藏，不会输出为 Codex 原生 reasoning block。
 - Responses storage 周边端点暂不支持，包括 `/v1/responses/{id}`、`/v1/responses/{id}/input_items`、`/v1/responses/{id}/cancel`、`/v1/responses/compact`、`/v1/responses/input_tokens`。
