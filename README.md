@@ -86,7 +86,7 @@ POST /alpha/generate
    - CC `text-delta` 转成各协议文本 delta。
    - CC `tool-input-start/delta/end` 转成各协议工具参数增量。
    - CC `finish.totalUsage` 转成各协议 usage。
-   - CC `reasoning-delta` 默认不混入正文，避免客户端把思考过程当作最终回答显示。
+   - CC `reasoning-delta` 映射为各协议的推理/思考格式（Anthropic thinking block / OpenAI Responses reasoning item / Chat Completions reasoning_content delta）。
 
 ## 支持的端点
 
@@ -132,6 +132,7 @@ http://localhost:8888/v1
 | `COMMANDCODE_API_BASE` | `https://api.commandcode.ai` | Command Code 上游地址 |
 | `CMD_PROXY_PORT` | `8888` | 本地监听端口 |
 | `CMD_PROXY_AUTH_MODE` | `pass_through` | 上游鉴权策略：`pass_through`、`fixed`、`none` |
+| `CMD_PROXY_UPSTREAM_TIMEOUT_MS` | `300000` | 上游请求超时（毫秒），默认 5 分钟 |
 | `LOG_LEVEL` | `info` | `fatal`、`error`、`warn`、`info`、`debug`、`trace`、`silent` |
 
 ## Codex 用法
@@ -211,16 +212,46 @@ pnpm test
 
 当前测试覆盖：
 
-- Responses 请求转换 + 流式事件转换
-- Chat Completions 请求转换 + 流式和非流式聚合
-- Anthropic Messages 请求转换 + 流式和非流式聚合
-- HTTP 路由、SSE 输出、错误格式、认证模式
+- Responses 请求转换 + 流式事件转换 + 推理 (reasoning) 映射 + 存储端点
+- Chat Completions 请求转换 + 流式和非流式聚合 + reasoning_content 映射
+- Anthropic Messages 请求转换 + 流式和非流式聚合 + 扩展思考 + prompt caching + 图片直传
+- HTTP 路由、SSE ping、错误格式、认证模式、超时控制
+- Responses 存储（内存）：GET /cancel、previous_response_id 上下文注入
 - Command Code 流解析
-- 环境变量校验
+- 环境变量校验 + 超时配置
+
+## 已实现功能
+
+- **Anthropic Messages**：extended thinking、prompt caching（cache_control 直传 + cache 用量回读）、图片 base64 直传、reasoning-delta 映射为 thinking block
+- **OpenAI Responses**：reasoning 映射为 reasoning item、previous_response_id 对话连续性、responses storage 5 个端点（CRUD + cancel + compact + input_tokens）
+- **OpenAI Chat Completions**：reasoning 映射为 reasoning_content、frequency_penalty / presence_penalty / response_format 转发、stream_options.include_usage 控制
+- **HTTP**：SSE ping 保活（15s）、上游请求超时（可配）、AbortController 取消
+- **通用**：3 种鉴权模式、模型别名映射、实时 SSE 协议转换
 
 ## 当前限制
 
-- WebSocket 端点尚未实现。
-- `reasoning-delta` 目前默认隐藏，不会输出为 Codex 原生 reasoning block。
-- Responses storage 周边端点暂不支持，包括 `/v1/responses/{id}`、`/v1/responses/{id}/input_items`、`/v1/responses/{id}/cancel`、`/v1/responses/compact`、`/v1/responses/input_tokens`。
-- 图片、多模态、web search、结构化输出等能力取决于 Command Code 上游模型和接口支持。
+- 图片、多模态、web search 等能力取决于 Command Code 上游模型和接口支持。
+- prompt caching 需 Command Code 上游模型实际支持 `cache_control`，否则参数被忽略。
+- `n > 1`（多选）、`logprobs`、`logit_bias` 暂不转发（Command Code 上游不支持）。
+
+## Docker 部署
+
+使用 docker-compose：
+
+```bash
+# 将 .env.example 复制为 .env 并填入 key
+cp .env.example .env
+docker compose up -d
+```
+
+或直接使用 Docker：
+
+```bash
+docker build -t cmd-proxy .
+docker run -d -p 8888:8888 \
+  -e COMMANDCODE_API_KEY \
+  -e CMD_PROXY_AUTH_MODE=fixed \
+  cmd-proxy
+```
+
+所有环境变量均支持通过 `-e` 传入，见上方配置表格。

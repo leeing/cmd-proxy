@@ -74,6 +74,38 @@ describe("convertChatCompletionRequestToCommandCode", () => {
 
     expect(result.params.tools[0]?.input_schema).toEqual({ type: "object", properties: {} })
   })
+
+  it("forwards sampling parameters to Command Code", () => {
+    const result = convertChatCompletionRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: 0.7,
+      top_p: 0.9,
+      frequency_penalty: 0.5,
+      presence_penalty: 0.3,
+      stop: ["END"],
+    })
+
+    expect(result.params.temperature).toBe(0.7)
+    expect(result.params.top_p).toBe(0.9)
+    expect(result.params.frequency_penalty).toBe(0.5)
+    expect(result.params.presence_penalty).toBe(0.3)
+    expect(result.params.stop).toEqual(["END"])
+  })
+
+  it("forwards response_format to Command Code", () => {
+    const jsonSchema = { type: "object", properties: { name: { type: "string" } } }
+    const result = convertChatCompletionRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: { type: "json_schema", json_schema: jsonSchema },
+    })
+
+    expect(result.params.response_format).toEqual({
+      type: "json_schema",
+      json_schema: jsonSchema,
+    })
+  })
 })
 
 describe("chatCompletionChunksFromCommandCodeEvents", () => {
@@ -131,5 +163,26 @@ describe("chatCompletionChunksFromCommandCodeEvents", () => {
       function: { name: "read_file", arguments: '{"path":"README.md"}' },
     })
     expect(firstChoice.finish_reason).toBe("tool_calls")
+  })
+
+  it("forwards reasoning-delta as reasoning_content in delta chunks", () => {
+    const chunks = chatCompletionChunksFromCommandCodeEvents(
+      [
+        { type: "reasoning-delta", text: "Let me think" },
+        { type: "reasoning-delta", text: " about this." },
+        { type: "reasoning-end" },
+        { type: "text-delta", text: "Answer" },
+        { type: "finish", finishReason: "stop" },
+      ],
+      { completionId: "chatcmpl_test", model: "deepseek-v4-pro", created: 1 },
+    )
+
+    const reasoningChunks = chunks.filter(
+      (c) => c.choices[0]?.delta.reasoning_content !== undefined,
+    )
+    expect(reasoningChunks).toHaveLength(2)
+    expect(reasoningChunks[0]?.choices[0]?.delta.reasoning_content).toBe("Let me think")
+    expect(reasoningChunks[1]?.choices[0]?.delta.reasoning_content).toBe(" about this.")
+    expect(chunks.some((c) => c.choices[0]?.delta.content === "Answer")).toBe(true)
   })
 })

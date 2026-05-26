@@ -1,0 +1,13 @@
+services:
+  cmd-proxy:
+    build: .
+    ports:
+      - "${CMD_PROXY_PORT:-8888}:8888"
+    environment:
+      - COMMANDCODE_API_KEY=${COMMANDCODE_API_KEY}
+      - CMD_PROXY_PORT=${CMD_PROXY_PORT:-8888}
+      - CMD_PROXY_AUTH_MODE=${CMD_PROXY_AUTH_MODE:-fixed}
+      - COMMANDCODE_API_BASE=${COMMANDCODE_API_BASE:-https://api.commandcode.ai}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CMD_PROXY_UPSTREAM_TIMEOUT_MS=${CMD_PROXY_UPSTREAM_TIMEOUT_MS:-300000}
+    restart: unless-stopped

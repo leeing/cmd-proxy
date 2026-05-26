@@ -61,6 +61,11 @@ export function convertResponsesRequestToCommandCode(
   if (typeof request.parallel_tool_calls === "boolean") {
     params.parallel_tool_calls = request.parallel_tool_calls
   }
+  if (typeof request.frequency_penalty === "number")
+    params.frequency_penalty = request.frequency_penalty
+  if (typeof request.presence_penalty === "number")
+    params.presence_penalty = request.presence_penalty
+  if (request.response_format) params.response_format = request.response_format
 
   const now = options.now ?? new Date()
   return {
@@ -291,6 +296,10 @@ interface ResponsesState {
   outputIndex: number
   textContent: string
   textOpen: boolean
+  reasoningContent: string
+  reasoningItemId: string
+  reasoningOutputIndex: number
+  reasoningOpen: boolean
   output: ResponsesOutputItem[]
   toolCalls: Map<string, ToolCallState>
   sentCreated: boolean
@@ -318,6 +327,10 @@ function createResponsesState(options: {
     outputIndex: 0,
     textContent: "",
     textOpen: false,
+    reasoningContent: "",
+    reasoningItemId: idWithPrefix("rsn"),
+    reasoningOutputIndex: -1,
+    reasoningOpen: false,
     output: [],
     toolCalls: new Map(),
     sentCreated: false,
@@ -336,7 +349,25 @@ function handleCommandCodeEvent(state: ResponsesState, event: CommandCodeStreamE
     return
   }
 
-  if (type === "reasoning-delta" || type === "reasoning-end") return
+  if (type === "reasoning-delta") {
+    ensureCreated(state)
+    startReasoning(state)
+    const delta = stringValue(event.text) ?? ""
+    state.reasoningContent += delta
+    state.events.push({
+      type: "response.reasoning_text.delta",
+      output_index: state.reasoningOutputIndex,
+      content_index: 0,
+      delta,
+    })
+    return
+  }
+
+  if (type === "reasoning-end") {
+    ensureCreated(state)
+    closeReasoning(state)
+    return
+  }
 
   if (type === "text-end") {
     ensureCreated(state)
@@ -462,6 +493,48 @@ function closeText(state: ResponsesState): void {
   state.output.push(item)
   state.outputIndex += 1
   state.textOpen = false
+}
+
+function startReasoning(state: ResponsesState): void {
+  if (state.reasoningOpen) return
+  if (state.reasoningOutputIndex < 0) {
+    state.reasoningOutputIndex = state.outputIndex
+    state.outputIndex += 1
+  }
+  state.events.push({
+    type: "response.output_item.added",
+    output_index: state.reasoningOutputIndex,
+    item: {
+      type: "reasoning",
+      id: state.reasoningItemId,
+      status: "in_progress",
+      summary: [],
+    },
+  })
+  state.reasoningOpen = true
+}
+
+function closeReasoning(state: ResponsesState): void {
+  if (!state.reasoningOpen) return
+  state.events.push({
+    type: "response.reasoning_text.done",
+    output_index: state.reasoningOutputIndex,
+    content_index: 0,
+    text: state.reasoningContent,
+  })
+  const item: ResponsesOutputItem = {
+    type: "reasoning",
+    id: state.reasoningItemId,
+    status: "completed",
+    summary: state.reasoningContent ? [{ type: "summary_text", text: state.reasoningContent }] : [],
+  }
+  state.events.push({
+    type: "response.output_item.done",
+    output_index: state.reasoningOutputIndex,
+    item,
+  })
+  state.output.push(item)
+  state.reasoningOpen = false
 }
 
 function startToolCall(
@@ -611,6 +684,7 @@ function usageFromFinish(event: CommandCodeStreamEvent): ResponsesUsage {
 function completeResponse(state: ResponsesState): void {
   if (state.sentCompleted) return
   closeText(state)
+  closeReasoning(state)
   state.events.push({
     type: "response.completed",
     response: {

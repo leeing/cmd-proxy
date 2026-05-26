@@ -34,6 +34,10 @@ export interface ChatCompletionRequest {
   stop?: string | string[]
   tool_choice?: unknown
   parallel_tool_calls?: boolean
+  frequency_penalty?: number
+  presence_penalty?: number
+  response_format?: { type: "text" | "json_object" | "json_schema"; json_schema?: unknown }
+  stream_options?: { include_usage?: boolean }
 }
 
 type ChatMessage =
@@ -53,6 +57,7 @@ export interface ChatCompletionChunk {
       role?: "assistant"
       content?: string
       tool_calls?: ChatToolCallDelta[]
+      reasoning_content?: string
     }
     finish_reason: "stop" | "length" | "tool_calls" | null
   }>
@@ -129,6 +134,11 @@ export function convertChatCompletionRequestToCommandCode(
   if (typeof request.parallel_tool_calls === "boolean") {
     params.parallel_tool_calls = request.parallel_tool_calls
   }
+  if (typeof request.frequency_penalty === "number")
+    params.frequency_penalty = request.frequency_penalty
+  if (typeof request.presence_penalty === "number")
+    params.presence_penalty = request.presence_penalty
+  if (request.response_format) params.response_format = request.response_format
 
   const now = options.now ?? new Date()
   return {
@@ -312,7 +322,13 @@ function handleChatEvent(state: ChatState, event: CommandCodeStreamEvent): void 
   const type = stringValue(event.type)
   if (!type) return
 
-  if (type === "reasoning-delta" || type === "reasoning-end") return
+  if (type === "reasoning-delta") {
+    ensureRole(state)
+    pushChunk(state, { reasoning_content: stringValue(event.text) ?? "" }, null)
+    return
+  }
+
+  if (type === "reasoning-end") return
 
   if (type === "text-delta") {
     ensureRole(state)

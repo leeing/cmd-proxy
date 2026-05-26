@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   anthropicMessagesFromCommandCodeEvents,
   convertAnthropicRequestToCommandCode,
+  createAnthropicMessagesStreamTranslator,
 } from "../src/messages.ts"
 import type { CommandCodeContent } from "../src/types.ts"
 
@@ -239,7 +240,7 @@ describe("convertAnthropicRequestToCommandCode", () => {
     expect(result.params.tools[0]?.description).toContain("unified diff")
   })
 
-  it("converts image blocks into text placeholders", () => {
+  it("passes image blocks through as image content", () => {
     const result = convertAnthropicRequestToCommandCode({
       model: "claude-sonnet-4-6",
       messages: [
@@ -262,11 +263,11 @@ describe("convertAnthropicRequestToCommandCode", () => {
     if (userContent?.type === "text") {
       expect(userContent.text).toBe("Describe this")
     }
-    const imagePlaceholder = result.params.messages[0]?.content[1]
-    expect(imagePlaceholder?.type).toBe("text")
-    if (imagePlaceholder?.type === "text") {
-      expect(imagePlaceholder.text).toContain("[Image:")
-      expect(imagePlaceholder.text).toContain("image/png")
+    const imageBlock = result.params.messages[0]?.content[1]
+    expect(imageBlock?.type).toBe("image")
+    if (imageBlock?.type === "image") {
+      expect(imageBlock.source.media_type).toBe("image/png")
+      expect(imageBlock.source.data).toBe("AAAA")
     }
   })
 
@@ -320,6 +321,57 @@ describe("convertAnthropicRequestToCommandCode", () => {
       type: "function",
       function: { name: "read_file" },
     })
+  })
+
+  it("maps thinking config to Command Code params", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hi" }],
+      thinking: { type: "enabled", budget_tokens: 16000 },
+      max_tokens: 4096,
+    })
+    expect(result.params.thinking).toEqual({
+      type: "enabled",
+      budget_tokens: 16000,
+    })
+  })
+
+  it("preserves cache_control on text blocks, tool results, and tools", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      system: [{ type: "text", text: "You are helpful.", cache_control: { type: "ephemeral" } }],
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Cached prompt", cache_control: { type: "ephemeral" } },
+            {
+              type: "tool_result",
+              tool_use_id: "call_1",
+              content: "result",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          name: "read_file",
+          description: "Read a file",
+          input_schema: { type: "object", properties: {} },
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      max_tokens: 4096,
+    })
+
+    expect(result.params.tools[0]?.cache_control).toEqual({ type: "ephemeral" })
+    const toolMessage = result.params.messages[0]
+    expect(toolMessage?.role).toBe("tool")
+    const toolContent = toolMessage?.content[0]
+    expect(toolContent).toHaveProperty("cache_control", { type: "ephemeral" })
+    const userContent = result.params.messages[1]?.content[0]
+    expect(userContent).toHaveProperty("cache_control", { type: "ephemeral" })
   })
 })
 
@@ -433,5 +485,110 @@ describe("anthropicMessagesFromCommandCodeEvents", () => {
     ])
 
     expect(response.stop_reason).toBe("max_tokens")
+  })
+
+  it("converts reasoning-delta into thinking content block", () => {
+    const response = anthropicMessagesFromCommandCodeEvents(
+      [
+        { type: "reasoning-delta", text: "Let me analyze" },
+        { type: "reasoning-delta", text: " the problem." },
+        { type: "reasoning-end" },
+        { type: "text-delta", text: "The answer is 42." },
+        { type: "finish", finishReason: "stop", totalUsage: { inputTokens: 5, outputTokens: 10 } },
+      ],
+      { messageId: "msg_test", model: "claude-sonnet-4-6" },
+    )
+
+    expect(response.content).toHaveLength(2)
+    expect(response.content[0]?.type).toBe("thinking")
+    if (response.content[0]?.type === "thinking") {
+      expect(response.content[0].thinking).toBe("Let me analyze the problem.")
+    }
+    expect(response.content[1]?.type).toBe("text")
+  })
+
+  it("closes thinking block before text starts", () => {
+    const response = anthropicMessagesFromCommandCodeEvents(
+      [
+        { type: "reasoning-delta", text: "Hmm" },
+        { type: "text-delta", text: "Answer" },
+        { type: "finish", finishReason: "stop" },
+      ],
+      { messageId: "msg_test" },
+    )
+
+    expect(response.content).toHaveLength(2)
+    expect(response.content[0]?.type).toBe("thinking")
+    expect(response.content[1]?.type).toBe("text")
+  })
+
+  it("includes cache read/creation tokens in usage", () => {
+    const response = anthropicMessagesFromCommandCodeEvents(
+      [
+        { type: "text-delta", text: "cached answer" },
+        {
+          type: "finish",
+          finishReason: "stop",
+          totalUsage: {
+            inputTokens: 100,
+            outputTokens: 10,
+            inputTokenDetails: {
+              cacheCreationTokens: 30,
+              cacheReadTokens: 50,
+            },
+          },
+        },
+      ],
+      { messageId: "msg_test" },
+    )
+
+    expect(response.usage.cache_creation_input_tokens).toBe(30)
+    expect(response.usage.cache_read_input_tokens).toBe(50)
+  })
+})
+
+describe("createAnthropicMessagesStreamTranslator", () => {
+  it("emits content_block_start/delta/stop sequence for text", () => {
+    const t = createAnthropicMessagesStreamTranslator({ messageId: "msg_test" })
+
+    const e1 = t.push({ type: "text-delta", text: "hello" })
+    expect(e1[0]?.type).toBe("message_start")
+    expect(e1[1]?.type).toBe("content_block_start")
+    expect(e1[1]?.content_block?.type).toBe("text")
+    expect(e1[2]?.type).toBe("content_block_delta")
+    expect(e1[2]?.delta).toEqual({ type: "text_delta", text: "hello" })
+
+    const e2 = t.push({ type: "text-delta", text: " world" })
+    expect(e2[0]?.type).toBe("content_block_delta")
+    expect(e2[0]?.delta).toEqual({ type: "text_delta", text: " world" })
+
+    const e3 = t.push({ type: "text-end" })
+    expect(e3[0]?.type).toBe("content_block_stop")
+  })
+
+  it("emits content_block_start/delta/stop for thinking", () => {
+    const t = createAnthropicMessagesStreamTranslator({ messageId: "msg_test" })
+
+    const e1 = t.push({ type: "reasoning-delta", text: "Hmm" })
+    const types1 = e1.map((e) => e.type)
+    expect(types1).toEqual(["message_start", "content_block_start", "content_block_delta"])
+    expect(e1[1]?.content_block?.type).toBe("thinking")
+    expect(e1[2]?.delta).toEqual({ type: "thinking_delta", thinking: "Hmm" })
+
+    const e2 = t.push({ type: "reasoning-end" })
+    expect(e2[0]?.type).toBe("content_block_stop")
+  })
+
+  it("closes thinking before starting text", () => {
+    const t = createAnthropicMessagesStreamTranslator({ messageId: "msg_test" })
+
+    t.push({ type: "reasoning-delta", text: "think" })
+    t.push({ type: "reasoning-end" })
+    const events = t.push({ type: "text-delta", text: "answer" })
+
+    // text block should start at index 1
+    expect(events[0]?.type).toBe("content_block_start")
+    expect(events[0]?.index).toBe(1)
+    expect(events[0]?.content_block?.type).toBe("text")
   })
 })

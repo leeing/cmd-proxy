@@ -139,40 +139,52 @@ describe("convertResponsesRequestToCommandCode", () => {
       },
     })
   })
+
+  it("forwards frequency_penalty, presence_penalty, and response_format", () => {
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: "hi",
+      frequency_penalty: 0.4,
+      presence_penalty: 0.2,
+      response_format: { type: "json_object" },
+    })
+
+    expect(result.params.frequency_penalty).toBe(0.4)
+    expect(result.params.presence_penalty).toBe(0.2)
+    expect(result.params.response_format).toEqual({ type: "json_object" })
+  })
 })
 
 describe("responsesEventsFromCommandCodeEvents", () => {
-  it("translates Command Code events incrementally for live SSE forwarding", () => {
+  it("forwards reasoning-delta as response.reasoning_text.delta events", () => {
     const translator = createResponsesStreamTranslator({
       responseId: "resp_test",
       model: "deepseek-v4-pro",
       createdAt: 1,
     })
 
+    const events = translator.push({ type: "reasoning-delta", text: "Let me think" })
+    expect(events.some((e) => e.type === "response.reasoning_text.delta")).toBe(true)
     expect(
-      JSON.stringify(translator.push({ type: "reasoning-delta", text: "hidden" })),
-    ).not.toContain("hidden")
-    expect(eventTypes(translator.push({ type: "text-delta", text: "hello" }))).toEqual([
-      "response.created",
-      "response.output_item.added",
-      "response.content_part.added",
-      "response.output_text.delta",
-    ])
-    expect(eventTypes(translator.push({ type: "finish", finishReason: "stop" }))).toContain(
-      "response.completed",
-    )
+      events.some((e) => e.type === "response.output_item.added" && e.item?.type === "reasoning"),
+    ).toBe(true)
   })
 
-  it("keeps reasoning out of assistant output_text by default", () => {
+  it("emits reasoning item with summary in final output", () => {
     const events = responsesEventsFromCommandCodeEvents([
-      { type: "reasoning-delta", text: "private thought" },
+      { type: "reasoning-delta", text: "Step 1: analyze" },
+      { type: "reasoning-delta", text: ", Step 2: conclude" },
       { type: "reasoning-end" },
       { type: "text-delta", text: "public answer" },
       { type: "finish", finishReason: "stop" },
     ])
 
-    expect(JSON.stringify(events)).not.toContain("private thought")
+    expect(JSON.stringify(events)).toContain("Step 1: analyze")
     expect(JSON.stringify(events)).toContain("public answer")
+    expect(events.some((e) => e.type === "response.reasoning_text.done")).toBe(true)
+    expect(
+      events.some((e) => e.type === "response.output_item.done" && e.item?.type === "reasoning"),
+    ).toBe(true)
   })
 
   it("streams tool input deltas before the final tool-call event", () => {

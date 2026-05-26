@@ -4,6 +4,15 @@ export type CommandCodeContent =
   | {
       type: "text"
       text: string
+      cache_control?: { type: "ephemeral" }
+    }
+  | {
+      type: "image"
+      source: {
+        type: "base64"
+        media_type: string
+        data: string
+      }
     }
   | {
       type: "tool-call"
@@ -19,6 +28,7 @@ export type CommandCodeContent =
         type: "text" | "error-text"
         value: string
       }
+      cache_control?: { type: "ephemeral" }
     }
 
 export interface CommandCodeMessage {
@@ -38,6 +48,10 @@ export interface CommandCodeParams {
   stop?: string | string[]
   tool_choice?: unknown
   parallel_tool_calls?: boolean
+  frequency_penalty?: number
+  presence_penalty?: number
+  thinking?: { type: "enabled"; budget_tokens: number }
+  response_format?: { type: "text" | "json_object" | "json_schema"; json_schema?: unknown }
 }
 
 export interface CommandCodePayload {
@@ -64,9 +78,11 @@ export interface CommandCodeTool {
   name: string
   description?: string
   input_schema: unknown
+  cache_control?: { type: "ephemeral" }
 }
 
 export interface ResponsesRequest {
+  id?: string
   model?: string
   instructions?: string
   input?: unknown
@@ -78,6 +94,10 @@ export interface ResponsesRequest {
   stop?: string | string[]
   tool_choice?: unknown
   parallel_tool_calls?: boolean
+  previous_response_id?: string
+  frequency_penalty?: number
+  presence_penalty?: number
+  response_format?: { type: "text" | "json_object" | "json_schema"; json_schema?: unknown }
 }
 
 export interface ResponsesUsage {
@@ -90,7 +110,7 @@ export interface ResponsesUsage {
 }
 
 export interface ResponsesOutputItem {
-  type: "message" | "function_call" | "custom_tool_call"
+  type: "message" | "function_call" | "custom_tool_call" | "reasoning"
   id: string
   status: "in_progress" | "completed"
   role?: "assistant"
@@ -99,6 +119,7 @@ export interface ResponsesOutputItem {
   name?: string
   arguments?: string
   input?: string
+  summary?: Array<{ type: "summary_text"; text: string }>
 }
 
 export interface ResponsesStreamEvent {

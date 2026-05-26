@@ -21,9 +21,18 @@ import {
 
 // --- Anthropic Messages API types ---
 
+export interface AnthropicCacheControl {
+  type: "ephemeral"
+}
+
+export interface AnthropicThinkingConfig {
+  type: "enabled"
+  budget_tokens: number
+}
+
 export interface AnthropicMessageRequest {
   model?: string
-  system?: string | AnthropicTextBlock[]
+  system?: string | (AnthropicTextBlock & { cache_control?: AnthropicCacheControl })[]
   messages?: AnthropicMessage[]
   tools?: AnthropicTool[]
   max_tokens?: number
@@ -33,26 +42,35 @@ export interface AnthropicMessageRequest {
   stop_sequences?: string[]
   tool_choice?: AnthropicToolChoice
   metadata?: Record<string, unknown>
+  thinking?: AnthropicThinkingConfig
 }
 
 export type AnthropicMessage =
-  | { role: "user"; content: string | AnthropicContentBlock[] }
-  | { role: "assistant"; content: string | AnthropicContentBlock[] }
+  | {
+      role: "user"
+      content: string | AnthropicContentBlock[]
+    }
+  | {
+      role: "assistant"
+      content: string | AnthropicContentBlock[]
+    }
 
 export type AnthropicContentBlock =
-  | { type: "text"; text: string }
+  | ({ type: "text"; text: string } & { cache_control?: AnthropicCacheControl })
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   | {
       type: "tool_result"
       tool_use_id: string
       content: string | AnthropicTextBlock[]
       is_error?: boolean
+      cache_control?: AnthropicCacheControl
     }
   | { type: "image"; source: AnthropicImageSource }
 
 export interface AnthropicTextBlock {
   type: "text"
   text: string
+  cache_control?: AnthropicCacheControl
 }
 
 export interface AnthropicImageSource {
@@ -65,6 +83,7 @@ export interface AnthropicTool {
   name: string
   description?: string
   input_schema: Record<string, unknown>
+  cache_control?: AnthropicCacheControl
 }
 
 export type AnthropicToolChoice =
@@ -89,10 +108,13 @@ export interface AnthropicMessageResponse {
 export type AnthropicResponseContentBlock =
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  | { type: "thinking"; thinking: string; signature: string }
 
 export interface AnthropicUsage {
   input_tokens: number
   output_tokens: number
+  cache_creation_input_tokens?: number
+  cache_read_input_tokens?: number
 }
 
 // SSE events
@@ -120,6 +142,7 @@ interface AnthropicSseMessage {
 type AnthropicSseDelta =
   | { type: "text_delta"; text: string }
   | { type: "input_json_delta"; partial_json: string }
+  | { type: "thinking_delta"; thinking: string }
 
 // --- Constants ---
 
@@ -169,6 +192,14 @@ export function convertAnthropicRequestToCommandCode(
     params.tool_choice = mapToolChoice(request.tool_choice)
   }
 
+  // Map Anthropic thinking config
+  if (request.thinking) {
+    params.thinking = {
+      type: "enabled",
+      budget_tokens: request.thinking.budget_tokens,
+    }
+  }
+
   const now = options.now ?? new Date()
   return {
     config: {
@@ -213,15 +244,17 @@ function appendAnthropicMessage(
 
     for (const block of contentBlocks) {
       if (block.type === "text") {
-        textParts.push({ type: "text", text: block.text })
+        const textContent: CommandCodeContent = { type: "text", text: block.text }
+        if (block.cache_control) textContent.cache_control = block.cache_control
+        textParts.push(textContent)
       } else if (block.type === "image") {
-        // Command Code doesn't natively support image blocks.
-        // Convert to a text placeholder so the model knows an image was attached.
-        const source = block.source
-        const mediaType = source?.media_type ?? "image"
         textParts.push({
-          type: "text",
-          text: `[Image: ${mediaType}, data omitted by proxy]`,
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: block.source.media_type,
+            data: block.source.data,
+          },
         })
       } else if (block.type === "tool_result") {
         // Anthropic puts tool_result in user messages, but Command Code
@@ -235,6 +268,7 @@ function appendAnthropicMessage(
             value: normalizeToolResultContent(block.content),
           },
         }
+        if (block.cache_control) result.cache_control = block.cache_control
         messages.push({ role: "tool", content: [result] })
       }
     }
@@ -287,6 +321,7 @@ function convertAnthropicTools(tools: AnthropicTool[] | undefined): CommandCodeT
       name,
       input_schema: normalizeToolSchema(name, tool.input_schema),
     }
+    if (tool.cache_control) commandCodeTool.cache_control = tool.cache_control
     const description = applyPatchDescription(name) ?? stringValue(tool.description)
     if (description) commandCodeTool.description = description
     converted.push(commandCodeTool)
@@ -351,14 +386,14 @@ export function anthropicMessagesFromCommandCodeEvents(
   for (const event of commandCodeEvents) {
     translator.push(event)
   }
-  return translator.finish()
+  return translator.finish().response
 }
 
 // --- Streaming Translator ---
 
 export interface AnthropicMessagesStreamTranslator {
   push(event: CommandCodeStreamEvent): AnthropicSseEvent[]
-  finish(): AnthropicMessageResponse
+  finish(): { events: AnthropicSseEvent[]; response: AnthropicMessageResponse }
 }
 
 export function createAnthropicMessagesStreamTranslator(
@@ -372,8 +407,10 @@ export function createAnthropicMessagesStreamTranslator(
       handleAnthropicEvent(state, event)
       return state.events.slice(start)
     },
-    finish(): AnthropicMessageResponse {
-      return buildFinalResponse(state)
+    finish() {
+      const start = state.events.length
+      const response = buildFinalResponse(state)
+      return { events: state.events.slice(start), response }
     },
   }
 }
@@ -391,8 +428,11 @@ interface AnthropicState {
     name: string
     input: Record<string, unknown>
   } | null
+  currentThinkingBlock: { type: "thinking"; thinking: string; signature: string } | null
   inputTokens: number
   outputTokens: number
+  cacheCreationInputTokens: number
+  cacheReadInputTokens: number
   stopReason: "end_turn" | "max_tokens" | "tool_use" | "stop_sequence" | null
   stopSequence: string | null
   sentStart: boolean
@@ -408,8 +448,11 @@ function createAnthropicState(options: { messageId?: string; model?: string }): 
     currentBlockIndex: 0,
     currentTextBlock: null,
     currentToolUseBlock: null,
+    currentThinkingBlock: null,
     inputTokens: 0,
     outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
     stopReason: null,
     stopSequence: null,
     sentStart: false,
@@ -421,7 +464,31 @@ function handleAnthropicEvent(state: AnthropicState, event: CommandCodeStreamEve
   const type = stringValue(event.type)
   if (!type) return
 
-  if (type === "reasoning-delta" || type === "reasoning-end") return
+  if (type === "reasoning-delta") {
+    ensureStart(state)
+    ensureThinkingBlock(state)
+    const delta = stringValue(event.text) ?? ""
+    if (state.currentThinkingBlock) {
+      state.currentThinkingBlock.thinking += delta
+    }
+    state.events.push({
+      type: "content_block_delta",
+      index: state.currentBlockIndex,
+      delta: { type: "thinking_delta", thinking: delta },
+    })
+    return
+  }
+
+  if (type === "reasoning-end") {
+    ensureStart(state)
+    if (state.currentThinkingBlock) {
+      state.contentBlocks.push(state.currentThinkingBlock)
+      state.events.push({ type: "content_block_stop", index: state.currentBlockIndex })
+      state.currentBlockIndex += 1
+      state.currentThinkingBlock = null
+    }
+    return
+  }
 
   if (type === "text-delta") {
     ensureStart(state)
@@ -452,6 +519,7 @@ function handleAnthropicEvent(state: AnthropicState, event: CommandCodeStreamEve
   if (type === "tool-input-start") {
     ensureStart(state)
     closeTextBlock(state)
+    closeThinkingBlock(state)
     startToolUseBlock(state, event)
     return
   }
@@ -488,6 +556,7 @@ function handleAnthropicEvent(state: AnthropicState, event: CommandCodeStreamEve
     ensureStart(state)
     closeTextBlock(state)
     closeToolUseBlock(state)
+    closeThinkingBlock(state)
 
     const id = stringValue(event.toolCallId) ?? stringValue(event.id) ?? idWithPrefix("toolu")
     const name = stringValue(event.toolName) ?? ""
@@ -508,10 +577,14 @@ function handleAnthropicEvent(state: AnthropicState, event: CommandCodeStreamEve
     ensureStart(state)
     closeTextBlock(state)
     closeToolUseBlock(state)
+    closeThinkingBlock(state)
 
     const usage = isRecord(event.totalUsage) ? event.totalUsage : {}
     state.inputTokens = numberValue(usage.inputTokens) ?? 0
     state.outputTokens = numberValue(usage.outputTokens) ?? 0
+    const cacheDetails = isRecord(usage.inputTokenDetails) ? usage.inputTokenDetails : {}
+    state.cacheCreationInputTokens = numberValue(cacheDetails.cacheCreationTokens) ?? 0
+    state.cacheReadInputTokens = numberValue(cacheDetails.cacheReadTokens) ?? 0
 
     state.stopReason = mapAnthropicStopReason(event.finishReason)
     state.stopSequence = stringValue(event.stop_reason) ?? null
@@ -548,11 +621,24 @@ function ensureStart(state: AnthropicState): void {
 function ensureTextBlock(state: AnthropicState): void {
   if (state.currentTextBlock) return
   closeToolUseBlock(state)
+  closeThinkingBlock(state)
   state.currentTextBlock = { type: "text", text: "" }
   state.events.push({
     type: "content_block_start",
     index: state.currentBlockIndex,
     content_block: { type: "text", text: "" },
+  })
+}
+
+function ensureThinkingBlock(state: AnthropicState): void {
+  if (state.currentThinkingBlock) return
+  closeTextBlock(state)
+  closeToolUseBlock(state)
+  state.currentThinkingBlock = { type: "thinking", thinking: "", signature: "" }
+  state.events.push({
+    type: "content_block_start",
+    index: state.currentBlockIndex,
+    content_block: { type: "thinking", thinking: "", signature: "" },
   })
 }
 
@@ -562,6 +648,14 @@ function closeTextBlock(state: AnthropicState): void {
   state.events.push({ type: "content_block_stop", index: state.currentBlockIndex })
   state.currentBlockIndex += 1
   state.currentTextBlock = null
+}
+
+function closeThinkingBlock(state: AnthropicState): void {
+  if (!state.currentThinkingBlock) return
+  state.contentBlocks.push(state.currentThinkingBlock)
+  state.events.push({ type: "content_block_stop", index: state.currentBlockIndex })
+  state.currentBlockIndex += 1
+  state.currentThinkingBlock = null
 }
 
 function closeToolUseBlock(state: AnthropicState): void {
@@ -600,11 +694,26 @@ function mapAnthropicStopReason(
   return null
 }
 
+function buildAnthropicUsage(state: AnthropicState): AnthropicUsage {
+  const usage: AnthropicUsage = {
+    input_tokens: state.inputTokens,
+    output_tokens: state.outputTokens,
+  }
+  if (state.cacheCreationInputTokens > 0) {
+    usage.cache_creation_input_tokens = state.cacheCreationInputTokens
+  }
+  if (state.cacheReadInputTokens > 0) {
+    usage.cache_read_input_tokens = state.cacheReadInputTokens
+  }
+  return usage
+}
+
 function buildFinalResponse(state: AnthropicState): AnthropicMessageResponse {
   // Close any open blocks
   if (!state.finished) {
     closeTextBlock(state)
     closeToolUseBlock(state)
+    closeThinkingBlock(state)
 
     if (state.stopReason === null) {
       state.stopReason = "end_turn"
@@ -627,9 +736,6 @@ function buildFinalResponse(state: AnthropicState): AnthropicMessageResponse {
     model: state.model,
     stop_reason: state.stopReason,
     stop_sequence: state.stopSequence,
-    usage: {
-      input_tokens: state.inputTokens,
-      output_tokens: state.outputTokens,
-    },
+    usage: buildAnthropicUsage(state),
   }
 }
