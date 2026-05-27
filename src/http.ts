@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 
 import pino, { type Logger } from "pino"
@@ -312,11 +312,11 @@ async function fetchCommandCode(
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${upstreamApiKey(req, config)}`,
-      "x-command-code-version": "0.24.1",
-      "x-cli-environment": "production",
-      "x-project-slug": "cmd-proxy",
-      "x-taste-learning": "false",
-      "x-co-flag": "false",
+      "x-command-code-version": config.cliVersion,
+      "x-cli-environment": config.cliEnvironment,
+      "x-project-slug": randomProjectSlug(),
+      "x-taste-learning": config.tasteLearning,
+      "x-co-flag": config.coFlag,
       "x-session-id": randomUUID(),
     },
     body: JSON.stringify(commandCodePayload),
@@ -345,6 +345,10 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   }
   if (!body.trim()) return {}
   return JSON.parse(body) as unknown
+}
+
+function randomProjectSlug(): string {
+  return `prj-${randomBytes(8).toString("hex")}`
 }
 
 async function readCommandCodeEvents(response: Response): Promise<CommandCodeStreamEvent[]> {

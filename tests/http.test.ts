@@ -18,6 +18,10 @@ function mockConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     upstreamTimeoutMs: 300_000,
     memory: "",
     taste: "",
+    cliVersion: "0.24.1",
+    cliEnvironment: "production",
+    tasteLearning: "false",
+    coFlag: "false",
     ...overrides,
   }
 }

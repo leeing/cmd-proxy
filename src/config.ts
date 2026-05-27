@@ -9,6 +9,10 @@ const envSchema = z.object({
   CMD_PROXY_AUTH_MODE: z.enum(["pass_through", "fixed", "none"]).default("pass_through"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   CMD_PROXY_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(5000).default(300_000),
+  CMD_PROXY_CLI_VERSION: z.string().default("0.24.1"),
+  CMD_PROXY_CLI_ENVIRONMENT: z.string().default("production"),
+  CMD_PROXY_TASTE_LEARNING: z.string().default("false"),
+  CMD_PROXY_CO_FLAG: z.string().default("false"),
 })
 
 export interface AppConfig {
@@ -20,6 +24,10 @@ export interface AppConfig {
   authMode: "pass_through" | "fixed" | "none"
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent"
   upstreamTimeoutMs: number
+  cliVersion: string
+  cliEnvironment: string
+  tasteLearning: string
+  coFlag: string
 }
 
 export function loadConfig(env: Record<string, string | undefined>): AppConfig {
@@ -33,5 +41,9 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     authMode: parsed.CMD_PROXY_AUTH_MODE,
     logLevel: parsed.LOG_LEVEL,
     upstreamTimeoutMs: parsed.CMD_PROXY_UPSTREAM_TIMEOUT_MS,
+    cliVersion: parsed.CMD_PROXY_CLI_VERSION,
+    cliEnvironment: parsed.CMD_PROXY_CLI_ENVIRONMENT,
+    tasteLearning: parsed.CMD_PROXY_TASTE_LEARNING,
+    coFlag: parsed.CMD_PROXY_CO_FLAG,
   }
 }
