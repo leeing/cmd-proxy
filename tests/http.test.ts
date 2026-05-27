@@ -30,7 +30,7 @@ async function startProxy(
 ): Promise<string> {
   const config: AppConfig = {
     apiKey: "user_fixed",
-    commandCodeApiBase: "https://commandcode.test",
+    apiBase: "https://commandcode.test",
     port: 0,
     logLevel: "silent",
     authMode: "fixed",
@@ -417,7 +417,7 @@ describe("createProxyServer", () => {
     })
   })
 
-  it("forwards x-api-key header to upstream in pass_through mode", async () => {
+  it("forwards matching x-api-key to upstream in pass_through mode", async () => {
     let upstreamHeaders: Record<string, string> | undefined
     const fetchImpl = ((_input, init) => {
       upstreamHeaders = init?.headers as Record<string, string> | undefined
@@ -433,7 +433,7 @@ describe("createProxyServer", () => {
     await fetch(`${baseUrl}/v1/messages`, {
       method: "POST",
       headers: {
-        "x-api-key": "client_key_from_sdk",
+        "x-api-key": "user_fixed",
         "Content-Type": "application/json",
         "anthropic-version": "2023-06-01",
       },
@@ -444,7 +444,109 @@ describe("createProxyServer", () => {
       }),
     })
 
-    expect(upstreamHeaders?.Authorization).toBe("Bearer client_key_from_sdk")
+    expect(upstreamHeaders?.Authorization).toBe("Bearer user_fixed")
+  })
+
+  it("rejects mismatched x-api-key in pass_through mode", async () => {
+    const fetchImpl = vi.fn(async () =>
+      commandCodeResponse([JSON.stringify({ type: "text-delta", text: "hello" })]),
+    ) as typeof fetch
+    const baseUrl = await startProxy(fetchImpl, undefined, { authMode: "pass_through" })
+
+    const response = await fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": "wrong_key",
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 4096,
+      }),
+    })
+
+    expect(response.status).toBe(401)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it("rejects mismatched Bearer token in pass_through mode", async () => {
+    const fetchImpl = vi.fn(async () =>
+      commandCodeResponse([JSON.stringify({ type: "text-delta", text: "hello" })]),
+    ) as typeof fetch
+    const baseUrl = await startProxy(fetchImpl, undefined, { authMode: "pass_through" })
+
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer wrong_key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "deepseek-v4-pro",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+
+    expect(response.status).toBe(401)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it("allows pass_through with no client key (falls through to config key)", async () => {
+    let upstreamHeaders: Record<string, string> | undefined
+    const fetchImpl = ((_input, init) => {
+      upstreamHeaders = init?.headers as Record<string, string> | undefined
+      return Promise.resolve(
+        commandCodeResponse([
+          JSON.stringify({ type: "text-delta", text: "hello" }),
+          JSON.stringify({ type: "finish", finishReason: "stop" }),
+        ]),
+      )
+    }) satisfies typeof fetch
+    const baseUrl = await startProxy(fetchImpl, undefined, { authMode: "pass_through" })
+
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "deepseek-v4-pro",
+        messages: [{ role: "user", content: "hi" }],
+        stream: false,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(upstreamHeaders?.Authorization).toBe("Bearer user_fixed")
+  })
+
+  it("always uses config key in fixed mode regardless of client key", async () => {
+    let upstreamHeaders: Record<string, string> | undefined
+    const fetchImpl = ((_input, init) => {
+      upstreamHeaders = init?.headers as Record<string, string> | undefined
+      return Promise.resolve(
+        commandCodeResponse([
+          JSON.stringify({ type: "text-delta", text: "hello" }),
+          JSON.stringify({ type: "finish", finishReason: "stop" }),
+        ]),
+      )
+    }) satisfies typeof fetch
+    const baseUrl = await startProxy(fetchImpl, undefined, { authMode: "fixed" })
+
+    await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer random_client_key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "deepseek-v4-pro",
+        messages: [{ role: "user", content: "hi" }],
+        stream: false,
+      }),
+    })
+
+    expect(upstreamHeaders?.Authorization).toBe("Bearer user_fixed")
   })
 
   it("streams Chat Completions over HTTP SSE with reasoning_content", async () => {

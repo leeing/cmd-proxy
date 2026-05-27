@@ -93,6 +93,18 @@ async function handleRequest(
     return
   }
 
+  if (config.authMode === "pass_through" && req.method === "POST") {
+    const clientKey = apiKeyFromRequest(req)
+    if (clientKey !== undefined && clientKey !== config.apiKey) {
+      sendOpenAiError(res, 401, {
+        message: "Invalid API key",
+        type: "authentication_error",
+        code: "invalid_api_key",
+      })
+      return
+    }
+  }
+
   if (req.method === "POST" && (url === "/responses" || url === "/v1/responses")) {
     await handleResponses(req, res, config, logger, fetchImpl, store)
     return
@@ -267,7 +279,7 @@ async function fetchCommandCode(
 ): Promise<Response> {
   const timeoutSignal = AbortSignal.timeout(config.upstreamTimeoutMs)
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
-  return await fetchImpl(`${config.commandCodeApiBase}/alpha/generate`, {
+  return await fetchImpl(`${config.apiBase}/alpha/generate`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
