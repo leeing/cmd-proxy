@@ -117,6 +117,7 @@ describe("convertAnthropicRequestToCommandCode", () => {
     const result = convertAnthropicRequestToCommandCode({
       model: "claude-sonnet-4-6",
       messages: [
+        { role: "user", content: "Run the command" },
         { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "bash", input: {} }] },
         {
           role: "user",
@@ -134,17 +135,18 @@ describe("convertAnthropicRequestToCommandCode", () => {
     })
 
     // text goes to user message, tool_result to separate tool message
-    expect(result.params.messages).toHaveLength(3)
-    expect(result.params.messages[0]?.role).toBe("assistant")
-    expect(result.params.messages[1]?.role).toBe("tool")
-    expect(result.params.messages[2]?.role).toBe("user")
-    expect(result.params.messages[2]?.content[0]?.type).toBe("text")
+    expect(result.params.messages).toHaveLength(4)
+    expect(result.params.messages[1]?.role).toBe("assistant")
+    expect(result.params.messages[2]?.role).toBe("tool")
+    expect(result.params.messages[3]?.role).toBe("user")
+    expect(result.params.messages[3]?.content[0]?.type).toBe("text")
   })
 
   it("converts tool_result with error flag", () => {
     const result = convertAnthropicRequestToCommandCode({
       model: "claude-sonnet-4-6",
       messages: [
+        { role: "user", content: "Run ls" },
         {
           role: "assistant",
           content: [{ type: "tool_use", id: "t1", name: "bash", input: { cmd: "ls" } }],
@@ -164,7 +166,7 @@ describe("convertAnthropicRequestToCommandCode", () => {
       max_tokens: 4096,
     })
 
-    const toolResult = expectToolResult(result.params.messages[1]?.content[0])
+    const toolResult = expectToolResult(result.params.messages[2]?.content[0])
     expect(toolResult.output.type).toBe("error-text")
   })
 
@@ -172,6 +174,7 @@ describe("convertAnthropicRequestToCommandCode", () => {
     const result = convertAnthropicRequestToCommandCode({
       model: "claude-sonnet-4-6",
       messages: [
+        { role: "user", content: "Run command" },
         {
           role: "assistant",
           content: [{ type: "tool_use", id: "t1", name: "bash", input: {} }],
@@ -193,7 +196,7 @@ describe("convertAnthropicRequestToCommandCode", () => {
       max_tokens: 4096,
     })
 
-    const toolResult = expectToolResult(result.params.messages[1]?.content[0])
+    const toolResult = expectToolResult(result.params.messages[2]?.content[0])
     expect(toolResult.output.value).toBe("line1\nline2")
   })
 
@@ -276,8 +279,11 @@ describe("convertAnthropicRequestToCommandCode", () => {
     const imageBlock = result.params.messages[0]?.content[1]
     expect(imageBlock?.type).toBe("image")
     if (imageBlock?.type === "image") {
-      expect(imageBlock.source.media_type).toBe("image/png")
-      expect(imageBlock.source.data).toBe("AAAA")
+      expect(imageBlock.source.type).toBe("base64")
+      if (imageBlock.source.type === "base64") {
+        expect(imageBlock.source.media_type).toBe("image/png")
+        expect(imageBlock.source.data).toBe("AAAA")
+      }
     }
   })
 
@@ -344,6 +350,170 @@ describe("convertAnthropicRequestToCommandCode", () => {
       type: "enabled",
       budget_tokens: 16000,
     })
+  })
+
+  it("forwards top_k to Command Code params", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hi" }],
+      top_k: 5,
+      max_tokens: 4096,
+    })
+
+    expect(result.params.top_k).toBe(5)
+  })
+
+  it("passes image URL blocks through as image content", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Describe this" },
+            {
+              type: "image",
+              source: { type: "url", url: "https://example.com/image.png" },
+            },
+          ],
+        },
+      ],
+      max_tokens: 4096,
+    })
+
+    expect(result.params.messages[0]?.content[1]).toEqual({
+      type: "image",
+      source: { type: "url", url: "https://example.com/image.png" },
+    })
+  })
+
+  it("converts text document blocks into Command Code text content", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              title: "Spec",
+              source: { type: "text", media_type: "text/plain", data: "Line 1\nLine 2" },
+            },
+          ],
+        },
+      ],
+      max_tokens: 4096,
+    })
+
+    expect(result.params.messages[0]?.content).toEqual([
+      { type: "text", text: "Document: Spec\n\nLine 1\nLine 2" },
+    ])
+  })
+
+  it("rejects unsupported Anthropic content blocks instead of dropping them", () => {
+    expect(() =>
+      convertAnthropicRequestToCommandCode({
+        model: "claude-sonnet-4-6",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "input_audio", source: { type: "base64", data: "AAAA" } } as never],
+          },
+        ],
+        max_tokens: 4096,
+      }),
+    ).toThrow("Unsupported Anthropic content block type: input_audio")
+  })
+
+  it("requires max_tokens for Anthropic Messages requests", () => {
+    expect(() =>
+      convertAnthropicRequestToCommandCode({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    ).toThrow("max_tokens is required")
+  })
+
+  it("requires at least one Anthropic message", () => {
+    expect(() =>
+      convertAnthropicRequestToCommandCode({
+        model: "claude-sonnet-4-6",
+        messages: [],
+        max_tokens: 4096,
+      }),
+    ).toThrow("messages must contain at least one message")
+  })
+
+  it("requires the first Anthropic message to use the user role", () => {
+    expect(() =>
+      convertAnthropicRequestToCommandCode({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "assistant", content: "hello" }],
+        max_tokens: 4096,
+      }),
+    ).toThrow("messages: first message must use the user role")
+  })
+
+  it("requires Anthropic message roles to alternate", () => {
+    expect(() =>
+      convertAnthropicRequestToCommandCode({
+        model: "claude-sonnet-4-6",
+        messages: [
+          { role: "user", content: "one" },
+          { role: "user", content: "two" },
+        ],
+        max_tokens: 4096,
+      }),
+    ).toThrow("messages: roles must alternate between user and assistant")
+  })
+
+  it("rejects unsupported Anthropic server tools instead of mis-mapping them", () => {
+    expect(() =>
+      convertAnthropicRequestToCommandCode({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "search" }],
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        max_tokens: 4096,
+      }),
+    ).toThrow("Unsupported Anthropic tool type: web_search_20250305")
+  })
+
+  it("forwards lightweight Anthropic request metadata and service tier", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hi" }],
+      metadata: { user_id: "u_123" },
+      service_tier: "standard_only",
+      max_tokens: 4096,
+    })
+
+    expect(result.params.metadata).toEqual({ user_id: "u_123" })
+    expect(result.params.service_tier).toBe("standard_only")
+  })
+
+  it("rejects upstream-dependent Anthropic native request fields explicitly", () => {
+    expect(() =>
+      convertAnthropicRequestToCommandCode({
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+        mcp_servers: [{ type: "url", url: "https://mcp.example" }],
+        max_tokens: 4096,
+      }),
+    ).toThrow("mcp_servers requires anthropic-beta: mcp-client-2025-11-20")
+  })
+
+  it("distinguishes enabled beta fields from implemented beta fields", () => {
+    expect(() =>
+      convertAnthropicRequestToCommandCode(
+        {
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          mcp_servers: [{ type: "url", url: "https://mcp.example" }],
+          max_tokens: 4096,
+        },
+        { betaHeaders: ["mcp-client-2025-11-20"] },
+      ),
+    ).toThrow("Unsupported Anthropic request field: mcp_servers")
   })
 
   it("preserves cache_control on text blocks, tool results, and tools", () => {
@@ -431,7 +601,7 @@ describe("anthropicMessagesFromCommandCodeEvents", () => {
     if (response.content[0]?.type === "tool_use") {
       expect(response.content[0].id).toBe("call_1")
       expect(response.content[0].name).toBe("read_file")
-      expect(response.content[0].input).toEqual({})
+      expect(response.content[0].input).toEqual({ path: "README.md" })
     }
   })
 
@@ -517,6 +687,85 @@ describe("anthropicMessagesFromCommandCodeEvents", () => {
     expect(response.content[1]?.type).toBe("text")
   })
 
+  it("adds thinking signature deltas to streaming and final thinking blocks", () => {
+    const t = createAnthropicMessagesStreamTranslator({ messageId: "msg_test" })
+
+    t.push({ type: "reasoning-delta", text: "secret" })
+    const signatureEvents = t.push({ type: "reasoning-signature-delta", signature: "sig_123" })
+    t.push({ type: "reasoning-end" })
+    const { response } = t.finish()
+
+    expect(signatureEvents[0]).toMatchObject({
+      type: "content_block_delta",
+      delta: { type: "signature_delta", signature: "sig_123" },
+    })
+    expect(response.content[0]).toEqual({
+      type: "thinking",
+      thinking: "secret",
+      signature: "sig_123",
+    })
+  })
+
+  it("uses early usage events for message_start usage", () => {
+    const t = createAnthropicMessagesStreamTranslator({ messageId: "msg_test" })
+
+    const usageEvents = t.push({
+      type: "usage-start",
+      totalUsage: {
+        inputTokens: 25,
+        outputTokens: 1,
+        inputTokenDetails: { cacheCreationTokens: 5, cacheReadTokens: 10 },
+      },
+    })
+    expect(usageEvents).toEqual([])
+
+    const startEvents = t.push({ type: "text-delta", text: "hello" })
+    expect(startEvents[0]?.message?.usage).toEqual({
+      input_tokens: 25,
+      output_tokens: 1,
+      cache_creation_input_tokens: 5,
+      cache_read_input_tokens: 10,
+    })
+  })
+
+  it("preserves extended usage fields in final Anthropic usage", () => {
+    const response = anthropicMessagesFromCommandCodeEvents([
+      { type: "text-delta", text: "answer" },
+      {
+        type: "finish",
+        finishReason: "stop",
+        totalUsage: {
+          inputTokens: 8,
+          outputTokens: 2,
+          cacheCreation: { ephemeral_5m_input_tokens: 4, ephemeral_1h_input_tokens: 0 },
+          serviceTier: "standard",
+          inferenceGeo: "global",
+          serverToolUse: { web_search_requests: 1 },
+        },
+      },
+    ])
+
+    expect(response.usage).toMatchObject({
+      input_tokens: 8,
+      output_tokens: 2,
+      cache_creation: { ephemeral_5m_input_tokens: 4, ephemeral_1h_input_tokens: 0 },
+      service_tier: "standard",
+      inference_geo: "global",
+      server_tool_use: { web_search_requests: 1 },
+    })
+  })
+
+  it("maps newer Anthropic stop reasons", () => {
+    for (const stopReason of ["pause_turn", "refusal", "model_context_window_exceeded"] as const) {
+      const response = anthropicMessagesFromCommandCodeEvents([
+        { type: "text-delta", text: "partial" },
+        { type: "finish", finishReason: stopReason },
+      ])
+
+      expect(response.stop_reason).toBe(stopReason)
+    }
+  })
+
   it("closes thinking block before text starts", () => {
     const response = anthropicMessagesFromCommandCodeEvents(
       [
@@ -600,5 +849,24 @@ describe("createAnthropicMessagesStreamTranslator", () => {
     expect(events[0]?.type).toBe("content_block_start")
     expect(events[0]?.index).toBe(1)
     expect(events[0]?.content_block?.type).toBe("text")
+  })
+
+  it("emits Anthropic error events for upstream stream errors", () => {
+    const t = createAnthropicMessagesStreamTranslator({ messageId: "msg_test" })
+
+    const events = t.push({
+      type: "error",
+      error: { type: "overloaded_error", message: "Overloaded" },
+    })
+
+    expect(events).toEqual([
+      { type: "error", error: { type: "overloaded_error", message: "Overloaded" } },
+    ])
+  })
+
+  it("emits Anthropic ping events for upstream ping events", () => {
+    const t = createAnthropicMessagesStreamTranslator({ messageId: "msg_test" })
+
+    expect(t.push({ type: "ping" })).toEqual([{ type: "ping" }])
   })
 })

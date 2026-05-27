@@ -31,6 +31,18 @@ export interface AnthropicThinkingConfig {
   budget_tokens: number
 }
 
+class AnthropicRequestError extends Error {
+  readonly status: number
+  readonly type: string
+
+  constructor(message: string, options: { status?: number; type?: string } = {}) {
+    super(message)
+    this.name = "AnthropicRequestError"
+    this.status = options.status ?? 400
+    this.type = options.type ?? "invalid_request_error"
+  }
+}
+
 export interface AnthropicMessageRequest {
   model?: string
   system?: string | (AnthropicTextBlock & { cache_control?: AnthropicCacheControl })[]
@@ -40,10 +52,16 @@ export interface AnthropicMessageRequest {
   stream?: boolean
   temperature?: number
   top_p?: number
+  top_k?: number
   stop_sequences?: string[]
   tool_choice?: AnthropicToolChoice
   metadata?: Record<string, unknown>
   thinking?: AnthropicThinkingConfig
+  service_tier?: string
+  container?: unknown
+  mcp_servers?: unknown
+  context_management?: unknown
+  output_config?: unknown
 }
 
 export type AnthropicMessage =
@@ -67,6 +85,14 @@ export type AnthropicContentBlock =
       cache_control?: AnthropicCacheControl
     }
   | { type: "image"; source: AnthropicImageSource }
+  | { type: "document"; title?: string; source: AnthropicDocumentSource }
+
+export interface AnthropicDocumentSource {
+  type: "text" | "base64" | "url"
+  media_type?: string
+  data?: string
+  url?: string
+}
 
 export interface AnthropicTextBlock {
   type: "text"
@@ -75,15 +101,17 @@ export interface AnthropicTextBlock {
 }
 
 export interface AnthropicImageSource {
-  type: "base64"
-  media_type: string
-  data: string
+  type: "base64" | "url"
+  media_type?: string
+  data?: string
+  url?: string
 }
 
 export interface AnthropicTool {
+  type?: string
   name: string
   description?: string
-  input_schema: Record<string, unknown>
+  input_schema?: Record<string, unknown>
   cache_control?: AnthropicCacheControl
 }
 
@@ -101,9 +129,13 @@ export interface AnthropicMessageResponse {
   role: "assistant"
   content: AnthropicResponseContentBlock[]
   model: string
-  stop_reason: "end_turn" | "max_tokens" | "tool_use" | "stop_sequence" | null
+  stop_reason: AnthropicStopReason
   stop_sequence: string | null
   usage: AnthropicUsage
+}
+
+export interface AnthropicTokenCountResponse {
+  input_tokens: number
 }
 
 export type AnthropicResponseContentBlock =
@@ -116,12 +148,17 @@ export interface AnthropicUsage {
   output_tokens: number
   cache_creation_input_tokens?: number
   cache_read_input_tokens?: number
+  cache_creation?: Record<string, unknown>
+  service_tier?: string
+  inference_geo?: string
+  server_tool_use?: Record<string, unknown>
 }
 
 // SSE events
 
 export interface AnthropicSseEvent {
   type: string
+  error?: { type: string; message: string }
   message?: AnthropicSseMessage
   index?: number
   content_block?: AnthropicResponseContentBlock
@@ -140,10 +177,21 @@ interface AnthropicSseMessage {
   usage: AnthropicUsage
 }
 
+type AnthropicStopReason =
+  | "end_turn"
+  | "max_tokens"
+  | "tool_use"
+  | "stop_sequence"
+  | "pause_turn"
+  | "refusal"
+  | "model_context_window_exceeded"
+  | null
+
 type AnthropicSseDelta =
   | { type: "text_delta"; text: string }
   | { type: "input_json_delta"; partial_json: string }
   | { type: "thinking_delta"; thinking: string }
+  | { type: "signature_delta"; signature: string }
 
 // --- Constants ---
 
@@ -157,8 +205,15 @@ const SYSTEM_PROMPT = ""
 
 export function convertAnthropicRequestToCommandCode(
   request: AnthropicMessageRequest,
-  options: { cwd?: string; now?: Date; memory?: string; taste?: string } = {},
+  options: {
+    cwd?: string
+    now?: Date
+    memory?: string
+    taste?: string
+    betaHeaders?: string[]
+  } = {},
 ): CommandCodePayload {
+  validateAnthropicRequest(request, options.betaHeaders ?? [], { requireMaxTokens: true })
   const systemParts: string[] = []
 
   // Handle system prompt
@@ -184,6 +239,9 @@ export function convertAnthropicRequestToCommandCode(
 
   if (typeof request.temperature === "number") params.temperature = Math.min(request.temperature, 1)
   if (typeof request.top_p === "number") params.top_p = request.top_p
+  if (typeof request.top_k === "number") params.top_k = request.top_k
+  if (isRecord(request.metadata)) params.metadata = request.metadata
+  if (typeof request.service_tier === "string") params.service_tier = request.service_tier
   if (request.stop_sequences && request.stop_sequences.length > 0) {
     params.stop = request.stop_sequences
   }
@@ -223,6 +281,30 @@ export function convertAnthropicRequestToCommandCode(
   }
 }
 
+export function countAnthropicInputTokens(
+  request: AnthropicMessageRequest,
+  options: { betaHeaders?: string[] } = {},
+): AnthropicTokenCountResponse {
+  validateAnthropicRequest(request, options.betaHeaders ?? [], { requireMaxTokens: false })
+
+  let tokenCount = 0
+  tokenCount += estimateTextTokens(normalizeSystem(request.system))
+  tokenCount += estimateTextTokens(request.model ?? "")
+  tokenCount += estimateJsonTokens(request.tools ?? [])
+  tokenCount += estimateJsonTokens(request.tool_choice ?? {})
+  tokenCount += estimateJsonTokens(request.thinking ?? {})
+
+  for (const message of request.messages ?? []) {
+    tokenCount += 4
+    tokenCount += estimateTextTokens(message.role)
+    for (const block of normalizeContent(message.content)) {
+      tokenCount += estimateContentBlockTokens(block)
+    }
+  }
+
+  return { input_tokens: Math.max(1, Math.ceil(tokenCount)) }
+}
+
 function normalizeSystem(system: string | AnthropicTextBlock[] | undefined): string {
   if (typeof system === "string") return system
   if (Array.isArray(system)) {
@@ -250,14 +332,10 @@ function appendAnthropicMessage(
         if (block.cache_control) textContent.cache_control = block.cache_control
         textParts.push(textContent)
       } else if (block.type === "image") {
-        textParts.push({
-          type: "image",
-          source: {
-            type: "base64",
-            media_type: block.source.media_type,
-            data: block.source.data,
-          },
-        })
+        const image = commandCodeImageContent(block.source)
+        if (image) textParts.push(image)
+      } else if (block.type === "document") {
+        textParts.push(documentTextContent(block))
       } else if (block.type === "tool_result") {
         // Anthropic puts tool_result in user messages, but Command Code
         // requires them in separate role="tool" messages.
@@ -272,6 +350,8 @@ function appendAnthropicMessage(
         }
         if (block.cache_control) result.cache_control = block.cache_control
         messages.push({ role: "tool", content: [result] })
+      } else {
+        throw unsupportedContentBlock(block)
       }
     }
 
@@ -293,6 +373,8 @@ function appendAnthropicMessage(
           toolName: block.name,
           input: block.input,
         })
+      } else {
+        throw unsupportedContentBlock(block)
       }
     }
 
@@ -310,18 +392,139 @@ function normalizeToolResultContent(content: string | AnthropicTextBlock[]): str
   return content.map((block) => block.text).join("\n")
 }
 
+function validateAnthropicRequest(
+  request: AnthropicMessageRequest,
+  betaHeaders: string[],
+  options: { requireMaxTokens: boolean },
+): void {
+  if (options.requireMaxTokens && typeof request.max_tokens !== "number") {
+    throw new AnthropicRequestError("max_tokens is required")
+  }
+  if (!Array.isArray(request.messages) || request.messages.length === 0) {
+    throw new AnthropicRequestError("messages must contain at least one message")
+  }
+  const firstMessage = request.messages[0]
+  if (firstMessage?.role !== "user") {
+    throw new AnthropicRequestError("messages: first message must use the user role")
+  }
+  for (let i = 1; i < request.messages.length; i += 1) {
+    if (request.messages[i]?.role === request.messages[i - 1]?.role) {
+      throw new AnthropicRequestError("messages: roles must alternate between user and assistant")
+    }
+  }
+  assertSupportedAnthropicRequest(request, betaHeaders)
+}
+
+function assertSupportedAnthropicRequest(
+  request: AnthropicMessageRequest,
+  betaHeaders: string[],
+): void {
+  assertBetaHeaderForField(request, betaHeaders, "mcp_servers", [
+    "mcp-client-2025-11-20",
+    "mcp-client-2025-04-04",
+  ])
+  assertBetaHeaderForField(request, betaHeaders, "context_management", [
+    "context-management-2025-06-27",
+  ])
+
+  for (const field of [
+    "container",
+    "mcp_servers",
+    "context_management",
+    "output_config",
+  ] as const) {
+    if (request[field] !== undefined) {
+      throw new AnthropicRequestError(`Unsupported Anthropic request field: ${field}`)
+    }
+  }
+}
+
+function assertBetaHeaderForField(
+  request: AnthropicMessageRequest,
+  betaHeaders: string[],
+  field: keyof AnthropicMessageRequest,
+  allowedBetas: string[],
+): void {
+  if (request[field] === undefined) return
+  if (allowedBetas.some((beta) => betaHeaders.includes(beta))) return
+  throw new AnthropicRequestError(`${field} requires anthropic-beta: ${allowedBetas[0]}`)
+}
+
+function unsupportedContentBlock(block: unknown): AnthropicRequestError {
+  const type = isRecord(block) ? stringValue(block.type) : undefined
+  return new AnthropicRequestError(`Unsupported Anthropic content block type: ${type ?? "unknown"}`)
+}
+
+function estimateContentBlockTokens(block: AnthropicContentBlock): number {
+  if (block.type === "text") return estimateTextTokens(block.text)
+  if (block.type === "tool_use")
+    return estimateTextTokens(block.name) + estimateJsonTokens(block.input)
+  if (block.type === "tool_result") return estimateToolResultTokens(block)
+  if (block.type === "image") return 256
+  if (block.type === "document") return estimateDocumentTokens(block)
+  return 1
+}
+
+function estimateToolResultTokens(
+  block: Extract<AnthropicContentBlock, { type: "tool_result" }>,
+): number {
+  const content = block.content
+  if (typeof content === "string") return estimateTextTokens(content)
+  return content.reduce((sum, item) => sum + estimateTextTokens(item.text), 0)
+}
+
+function estimateDocumentTokens(
+  block: Extract<AnthropicContentBlock, { type: "document" }>,
+): number {
+  if (block.source.type === "text") {
+    return estimateTextTokens(block.title ?? "") + estimateTextTokens(block.source.data ?? "")
+  }
+  return 512
+}
+
+function estimateJsonTokens(value: unknown): number {
+  const text = JSON.stringify(value ?? "")
+  return estimateTextTokens(text)
+}
+
+function estimateTextTokens(text: string): number {
+  const normalized = text.trim()
+  if (!normalized) return 0
+  const asciiWords = normalized.match(/[A-Za-z0-9_]+/g)?.length ?? 0
+  let nonAsciiChars = 0
+  let punctuation = 0
+  for (const char of normalized) {
+    if (/\s/.test(char)) continue
+    const codePoint = char.codePointAt(0) ?? 0
+    if (codePoint > 127) {
+      nonAsciiChars += 1
+    } else if (!/[A-Za-z0-9_]/.test(char)) {
+      punctuation += 1
+    }
+  }
+  const charEstimate = normalized.length / 4
+  return Math.max(charEstimate, asciiWords + nonAsciiChars + punctuation * 0.25)
+}
+
 function convertAnthropicTools(tools: AnthropicTool[] | undefined): CommandCodeTool[] {
   if (!tools || !Array.isArray(tools)) return []
   const converted: CommandCodeTool[] = []
 
   for (const tool of tools) {
     if (!isRecord(tool)) continue
+    const type = stringValue(tool.type)
+    if (type && type !== "custom") {
+      throw new AnthropicRequestError(`Unsupported Anthropic tool type: ${type}`)
+    }
     const name = stringValue(tool.name)
     if (!name) continue
     const commandCodeTool: CommandCodeTool = {
       type: "function",
       name,
-      input_schema: normalizeToolSchema(name, tool.input_schema),
+      input_schema: normalizeToolSchema(
+        name,
+        tool.input_schema ?? { type: "object", properties: {} },
+      ),
     }
     if (tool.cache_control) commandCodeTool.cache_control = tool.cache_control
     const description = applyPatchDescription(name) ?? stringValue(tool.description)
@@ -330,6 +533,46 @@ function convertAnthropicTools(tools: AnthropicTool[] | undefined): CommandCodeT
   }
 
   return converted
+}
+
+export function isAnthropicRequestError(error: unknown): error is AnthropicRequestError {
+  return error instanceof AnthropicRequestError
+}
+
+function commandCodeImageContent(
+  source: AnthropicImageSource,
+): Extract<CommandCodeContent, { type: "image" }> | undefined {
+  if (source.type === "url") {
+    const url = stringValue(source.url)
+    return url ? { type: "image", source: { type: "url", url } } : undefined
+  }
+  const mediaType = stringValue(source.media_type)
+  const data = stringValue(source.data)
+  if (!mediaType || !data) return undefined
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: mediaType,
+      data,
+    },
+  }
+}
+
+function documentTextContent(
+  block: Extract<AnthropicContentBlock, { type: "document" }>,
+): Extract<CommandCodeContent, { type: "text" }> {
+  if (block.source.type !== "text") {
+    throw new AnthropicRequestError(
+      `Unsupported Anthropic document source type: ${block.source.type}`,
+    )
+  }
+  const data = stringValue(block.source.data) ?? ""
+  const title = stringValue(block.title)
+  return {
+    type: "text",
+    text: title ? `Document: ${title}\n\n${data}` : data,
+  }
 }
 
 function normalizeToolSchema(
@@ -430,12 +673,17 @@ interface AnthropicState {
     name: string
     input: Record<string, unknown>
   } | null
+  currentToolInputJson: string
   currentThinkingBlock: { type: "thinking"; thinking: string; signature: string } | null
   inputTokens: number
   outputTokens: number
   cacheCreationInputTokens: number
   cacheReadInputTokens: number
-  stopReason: "end_turn" | "max_tokens" | "tool_use" | "stop_sequence" | null
+  cacheCreation: Record<string, unknown> | undefined
+  serviceTier: string | undefined
+  inferenceGeo: string | undefined
+  serverToolUse: Record<string, unknown> | undefined
+  stopReason: AnthropicStopReason
   stopSequence: string | null
   sentStart: boolean
   finished: boolean
@@ -450,11 +698,16 @@ function createAnthropicState(options: { messageId?: string; model?: string }): 
     currentBlockIndex: 0,
     currentTextBlock: null,
     currentToolUseBlock: null,
+    currentToolInputJson: "",
     currentThinkingBlock: null,
     inputTokens: 0,
     outputTokens: 0,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: 0,
+    cacheCreation: undefined,
+    serviceTier: undefined,
+    inferenceGeo: undefined,
+    serverToolUse: undefined,
     stopReason: null,
     stopSequence: null,
     sentStart: false,
@@ -465,6 +718,21 @@ function createAnthropicState(options: { messageId?: string; model?: string }): 
 function handleAnthropicEvent(state: AnthropicState, event: CommandCodeStreamEvent): void {
   const type = stringValue(event.type)
   if (!type) return
+
+  if (type === "error") {
+    state.events.push({ type: "error", error: anthropicStreamError(event) })
+    return
+  }
+
+  if (type === "ping") {
+    state.events.push({ type: "ping" })
+    return
+  }
+
+  if (type === "usage-start" || type === "usage") {
+    updateUsageFromEvent(state, event)
+    return
+  }
 
   if (type === "reasoning-delta") {
     ensureStart(state)
@@ -483,12 +751,34 @@ function handleAnthropicEvent(state: AnthropicState, event: CommandCodeStreamEve
 
   if (type === "reasoning-end") {
     ensureStart(state)
+    const signature = stringValue(event.signature)
+    if (signature && state.currentThinkingBlock) {
+      state.currentThinkingBlock.signature = signature
+      state.events.push({
+        type: "content_block_delta",
+        index: state.currentBlockIndex,
+        delta: { type: "signature_delta", signature },
+      })
+    }
     if (state.currentThinkingBlock) {
       state.contentBlocks.push(state.currentThinkingBlock)
       state.events.push({ type: "content_block_stop", index: state.currentBlockIndex })
       state.currentBlockIndex += 1
       state.currentThinkingBlock = null
     }
+    return
+  }
+
+  if (type === "reasoning-signature-delta") {
+    ensureStart(state)
+    ensureThinkingBlock(state)
+    const signature = stringValue(event.signature) ?? ""
+    if (state.currentThinkingBlock) state.currentThinkingBlock.signature += signature
+    state.events.push({
+      type: "content_block_delta",
+      index: state.currentBlockIndex,
+      delta: { type: "signature_delta", signature },
+    })
     return
   }
 
@@ -530,6 +820,7 @@ function handleAnthropicEvent(state: AnthropicState, event: CommandCodeStreamEve
     ensureStart(state)
     if (state.currentToolUseBlock) {
       const rawDelta = stringValue(event.delta) ?? ""
+      state.currentToolInputJson += rawDelta
       state.events.push({
         type: "content_block_delta",
         index: state.currentBlockIndex,
@@ -542,13 +833,14 @@ function handleAnthropicEvent(state: AnthropicState, event: CommandCodeStreamEve
   if (type === "tool-input-end") {
     ensureStart(state)
     if (state.currentToolUseBlock) {
-      // Try to parse accumulated input
       const id = stringValue(event.id) ?? stringValue(event.toolCallId)
       if (id) state.currentToolUseBlock.id = id
+      state.currentToolUseBlock.input = recordOrEmpty(state.currentToolInputJson)
       state.contentBlocks.push(state.currentToolUseBlock)
       state.events.push({ type: "content_block_stop", index: state.currentBlockIndex })
       state.currentBlockIndex += 1
       state.currentToolUseBlock = null
+      state.currentToolInputJson = ""
     }
     return
   }
@@ -581,12 +873,7 @@ function handleAnthropicEvent(state: AnthropicState, event: CommandCodeStreamEve
     closeToolUseBlock(state)
     closeThinkingBlock(state)
 
-    const usage = isRecord(event.totalUsage) ? event.totalUsage : {}
-    state.inputTokens = numberValue(usage.inputTokens) ?? 0
-    state.outputTokens = numberValue(usage.outputTokens) ?? 0
-    const cacheDetails = isRecord(usage.inputTokenDetails) ? usage.inputTokenDetails : {}
-    state.cacheCreationInputTokens = numberValue(cacheDetails.cacheCreationTokens) ?? 0
-    state.cacheReadInputTokens = numberValue(cacheDetails.cacheReadTokens) ?? 0
+    updateUsageFromEvent(state, event)
 
     state.stopReason = mapAnthropicStopReason(event.finishReason)
     state.stopSequence = stringValue(event.stop_reason) ?? null
@@ -614,7 +901,7 @@ function ensureStart(state: AnthropicState): void {
       model: state.model,
       stop_reason: null,
       stop_sequence: null,
-      usage: { input_tokens: state.inputTokens, output_tokens: state.outputTokens },
+      usage: buildAnthropicUsage(state),
     },
   })
   state.sentStart = true
@@ -662,10 +949,12 @@ function closeThinkingBlock(state: AnthropicState): void {
 
 function closeToolUseBlock(state: AnthropicState): void {
   if (!state.currentToolUseBlock) return
+  state.currentToolUseBlock.input = recordOrEmpty(state.currentToolInputJson)
   state.contentBlocks.push(state.currentToolUseBlock)
   state.events.push({ type: "content_block_stop", index: state.currentBlockIndex })
   state.currentBlockIndex += 1
   state.currentToolUseBlock = null
+  state.currentToolInputJson = ""
 }
 
 function startToolUseBlock(state: AnthropicState, event: CommandCodeStreamEvent): void {
@@ -678,6 +967,7 @@ function startToolUseBlock(state: AnthropicState, event: CommandCodeStreamEvent)
     name,
     input: {},
   }
+  state.currentToolInputJson = ""
 
   state.events.push({
     type: "content_block_start",
@@ -686,14 +976,62 @@ function startToolUseBlock(state: AnthropicState, event: CommandCodeStreamEvent)
   })
 }
 
-function mapAnthropicStopReason(
-  reason: unknown,
-): "end_turn" | "max_tokens" | "tool_use" | "stop_sequence" | null {
+function mapAnthropicStopReason(reason: unknown): AnthropicStopReason {
   if (reason === "tool-calls" || reason === "tool_use") return "tool_use"
   if (reason === "length" || reason === "max_tokens" || reason === "max-tokens") return "max_tokens"
   if (reason === "stop_sequence" || reason === "stop-sequence") return "stop_sequence"
   if (reason === "stop" || reason === "end_turn") return "end_turn"
+  if (
+    reason === "pause_turn" ||
+    reason === "refusal" ||
+    reason === "model_context_window_exceeded"
+  ) {
+    return reason
+  }
   return null
+}
+
+function updateUsageFromEvent(state: AnthropicState, event: CommandCodeStreamEvent): void {
+  const usage = isRecord(event.totalUsage)
+    ? event.totalUsage
+    : isRecord(event.usage)
+      ? event.usage
+      : event
+  state.inputTokens =
+    numberValue(usage.inputTokens) ?? numberValue(usage.input_tokens) ?? state.inputTokens
+  state.outputTokens =
+    numberValue(usage.outputTokens) ?? numberValue(usage.output_tokens) ?? state.outputTokens
+  const cacheDetails = isRecord(usage.inputTokenDetails) ? usage.inputTokenDetails : {}
+  state.cacheCreationInputTokens =
+    numberValue(cacheDetails.cacheCreationTokens) ??
+    numberValue(usage.cache_creation_input_tokens) ??
+    state.cacheCreationInputTokens
+  state.cacheReadInputTokens =
+    numberValue(cacheDetails.cacheReadTokens) ??
+    numberValue(usage.cache_read_input_tokens) ??
+    state.cacheReadInputTokens
+  state.cacheCreation = isRecord(usage.cacheCreation)
+    ? usage.cacheCreation
+    : isRecord(usage.cache_creation)
+      ? usage.cache_creation
+      : state.cacheCreation
+  state.serviceTier =
+    stringValue(usage.serviceTier) ?? stringValue(usage.service_tier) ?? state.serviceTier
+  state.inferenceGeo =
+    stringValue(usage.inferenceGeo) ?? stringValue(usage.inference_geo) ?? state.inferenceGeo
+  state.serverToolUse = isRecord(usage.serverToolUse)
+    ? usage.serverToolUse
+    : isRecord(usage.server_tool_use)
+      ? usage.server_tool_use
+      : state.serverToolUse
+}
+
+function anthropicStreamError(event: CommandCodeStreamEvent): { type: string; message: string } {
+  const error = isRecord(event.error) ? event.error : event
+  return {
+    type: stringValue(error.type) ?? "server_error",
+    message: stringValue(error.message) ?? "Upstream stream error",
+  }
 }
 
 function buildAnthropicUsage(state: AnthropicState): AnthropicUsage {
@@ -707,6 +1045,10 @@ function buildAnthropicUsage(state: AnthropicState): AnthropicUsage {
   if (state.cacheReadInputTokens > 0) {
     usage.cache_read_input_tokens = state.cacheReadInputTokens
   }
+  if (state.cacheCreation) usage.cache_creation = state.cacheCreation
+  if (state.serviceTier) usage.service_tier = state.serviceTier
+  if (state.inferenceGeo) usage.inference_geo = state.inferenceGeo
+  if (state.serverToolUse) usage.server_tool_use = state.serverToolUse
   return usage
 }
 

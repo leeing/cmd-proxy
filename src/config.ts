@@ -13,6 +13,7 @@ const envSchema = z.object({
   CMD_PROXY_CLI_ENVIRONMENT: z.string().default("production"),
   CMD_PROXY_TASTE_LEARNING: z.string().default("false"),
   CMD_PROXY_CO_FLAG: z.string().default("false"),
+  CMD_PROXY_MODEL_MAP: z.string().default(""),
 })
 
 export interface AppConfig {
@@ -28,6 +29,7 @@ export interface AppConfig {
   cliEnvironment: string
   tasteLearning: string
   coFlag: string
+  customModelMap: Record<string, string>
 }
 
 export function loadConfig(env: Record<string, string | undefined>): AppConfig {
@@ -45,5 +47,21 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     cliEnvironment: parsed.CMD_PROXY_CLI_ENVIRONMENT,
     tasteLearning: parsed.CMD_PROXY_TASTE_LEARNING,
     coFlag: parsed.CMD_PROXY_CO_FLAG,
+    customModelMap: parseModelMap(parsed.CMD_PROXY_MODEL_MAP),
   }
+}
+
+function parseModelMap(raw: string): Record<string, string> {
+  if (!raw) return {}
+  const map: Record<string, string> = {}
+  for (const pair of raw.split(";")) {
+    const trimmed = pair.trim()
+    if (!trimmed) continue
+    const eq = trimmed.indexOf("=")
+    if (eq < 1) continue
+    const alias = trimmed.slice(0, eq).trim()
+    const upstream = trimmed.slice(eq + 1).trim()
+    if (alias && upstream) map[alias] = upstream
+  }
+  return map
 }

@@ -22,6 +22,7 @@ function mockConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     cliEnvironment: "production",
     tasteLearning: "false",
     coFlag: "false",
+    customModelMap: {},
     ...overrides,
   }
 }
@@ -180,7 +181,7 @@ describe("createProxyServer", () => {
         message: "Invalid JSON request body",
         type: "invalid_request_error",
         code: "invalid_json",
-        param: null,
+        param: "body",
       },
     })
     expect(fetchImpl).not.toHaveBeenCalled()
@@ -465,6 +466,92 @@ describe("createProxyServer", () => {
     })
   })
 
+  it("returns Anthropic token counts without calling upstream", async () => {
+    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages/count_tokens",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          system: "You are concise.",
+          messages: [{ role: "user", content: "Count these tokens please." }],
+          tools: [
+            {
+              name: "read_file",
+              description: "Read a file",
+              input_schema: { type: "object", properties: { path: { type: "string" } } },
+            },
+          ],
+        }),
+        {
+          "x-api-key": "dummy",
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "token-counting-2024-11-01",
+        },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    const r = result()
+    expect(r.status).toBe(200)
+    expect(r.headers["anthropic-version"]).toBe("2023-06-01")
+    expect(r.headers["anthropic-beta"]).toBe("token-counting-2024-11-01")
+    expect(r.headers["request-id"]).toMatch(/^req_/)
+    const body = JSON.parse(r.body) as { input_tokens?: unknown }
+    expect(typeof body.input_tokens).toBe("number")
+    expect(body.input_tokens).toBeGreaterThan(0)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it("applies Anthropic beta gates to token counting requests", async () => {
+    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages/count_tokens",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          context_management: {
+            edits: [
+              {
+                type: "clear_tool_uses_20250919",
+                trigger: { type: "input_tokens", value: 30000 },
+                keep: { type: "tool_uses", value: 5 },
+              },
+            ],
+          },
+        }),
+        { "anthropic-version": "2023-06-01" },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    const r = result()
+    expect(r.status).toBe(400)
+    expect(JSON.parse(r.body)).toMatchObject({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "context_management requires anthropic-beta: context-management-2025-06-27",
+      },
+    })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
   it("maps Messages upstream errors to Anthropic error format", async () => {
     const fetchImpl = vi.fn(
       async () => new Response("unauthorized", { status: 401 }),
@@ -493,6 +580,229 @@ describe("createProxyServer", () => {
     expect(JSON.parse(r.body)).toMatchObject({
       type: "error",
       error: { type: "authentication_error" },
+    })
+    expect(r.headers["request-id"]).toMatch(/^req_/)
+  })
+
+  it("maps Anthropic upstream status codes to Anthropic error taxonomy", async () => {
+    const cases = [
+      [403, "permission_error"],
+      [404, "not_found_error"],
+      [413, "request_too_large"],
+      [429, "rate_limit_error"],
+      [502, "api_error"],
+    ] as const
+
+    for (const [status, type] of cases) {
+      const fetchImpl = vi.fn(
+        async () => new Response("upstream failed", { status }),
+      ) as typeof fetch
+      const { res, result } = mockResponse()
+      await handleRequest(
+        mockReq(
+          "POST",
+          "/v1/messages",
+          JSON.stringify({
+            model: "claude-sonnet-4-6",
+            messages: [{ role: "user", content: "hi" }],
+            max_tokens: 4096,
+          }),
+          { "anthropic-version": "2023-06-01" },
+        ),
+        res,
+        mockConfig(),
+        logger,
+        fetchImpl,
+        null,
+      )
+
+      const r = result()
+      expect(r.status).toBe(status)
+      expect(JSON.parse(r.body)).toMatchObject({
+        type: "error",
+        error: { type },
+      })
+    }
+  })
+
+  it("returns Anthropic 400 for unsupported Anthropic server tools", async () => {
+    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "search" }],
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          max_tokens: 4096,
+        }),
+        { "x-api-key": "dummy", "anthropic-version": "2023-06-01" },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    expect(result().status).toBe(400)
+    expect(JSON.parse(result().body)).toEqual({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "Unsupported Anthropic tool type: web_search_20250305",
+      },
+    })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it("preserves Anthropic version and beta headers on Messages responses", async () => {
+    const fetchImpl = vi.fn(async () =>
+      commandCodeResponse([
+        JSON.stringify({ type: "text-delta", text: "hello" }),
+        JSON.stringify({ type: "finish", finishReason: "stop" }),
+      ]),
+    ) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 4096,
+          stream: false,
+        }),
+        {
+          "x-api-key": "dummy",
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "prompt-caching-2024-07-31",
+        },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    const r = result()
+    expect(r.headers["anthropic-version"]).toBe("2023-06-01")
+    expect(r.headers["anthropic-beta"]).toBe("prompt-caching-2024-07-31")
+    expect(r.headers["request-id"]).toMatch(/^req_/)
+  })
+
+  it("preserves Anthropic version and beta headers on Anthropic request errors", async () => {
+    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: [{ type: "input_audio" }] }],
+          max_tokens: 4096,
+        }),
+        {
+          "x-api-key": "dummy",
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "claude-code-20250219",
+        },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    const r = result()
+    expect(r.status).toBe(400)
+    expect(r.headers["anthropic-version"]).toBe("2023-06-01")
+    expect(r.headers["anthropic-beta"]).toBe("claude-code-20250219")
+    expect(r.headers["request-id"]).toMatch(/^req_/)
+    expect(JSON.parse(r.body)).toMatchObject({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "Unsupported Anthropic content block type: input_audio",
+      },
+    })
+  })
+
+  it("requires Anthropic beta headers for gated beta request fields", async () => {
+    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          mcp_servers: [{ type: "url", name: "example", url: "https://mcp.example/sse" }],
+          max_tokens: 4096,
+        }),
+        { "anthropic-version": "2023-06-01" },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    const r = result()
+    expect(r.status).toBe(400)
+    expect(JSON.parse(r.body)).toMatchObject({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "mcp_servers requires anthropic-beta: mcp-client-2025-11-20",
+      },
+    })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it("parses comma separated Anthropic beta headers before beta feature checks", async () => {
+    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          mcp_servers: [{ type: "url", name: "example", url: "https://mcp.example/sse" }],
+          max_tokens: 4096,
+        }),
+        {
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "prompt-caching-2024-07-31, mcp-client-2025-11-20",
+        },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    const r = result()
+    expect(r.status).toBe(400)
+    expect(JSON.parse(r.body)).toMatchObject({
+      type: "error",
+      error: { message: "Unsupported Anthropic request field: mcp_servers" },
     })
   })
 
@@ -714,6 +1024,89 @@ describe("createProxyServer", () => {
     )
     expect(result().status).toBe(200)
     expect(result().body).toContain("usage")
+  })
+
+  it("omits usage from chat completions stream when stream_options.include_usage is not set", async () => {
+    const fetchImpl = vi.fn(async () =>
+      commandCodeResponse([
+        JSON.stringify({ type: "text-delta", text: "hi" }),
+        JSON.stringify({
+          type: "finish",
+          finishReason: "stop",
+          totalUsage: { inputTokens: 1, outputTokens: 2 },
+        }),
+      ]),
+    ) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/chat/completions",
+        JSON.stringify({
+          model: "deepseek-v4-pro",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+    expect(result().status).toBe(200)
+    expect(result().body).not.toContain('"usage"')
+  })
+
+  it("sets param for invalid JSON request errors", async () => {
+    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq("POST", "/v1/chat/completions", "{"),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    expect(JSON.parse(result().body)).toMatchObject({
+      error: { code: "invalid_json", param: "body" },
+    })
+  })
+
+  it("returns 400 for unsupported OpenAI Responses built-in tools", async () => {
+    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/responses",
+        JSON.stringify({
+          model: "deepseek-v4-pro",
+          input: "hi",
+          tools: [{ type: "web_search_preview" }],
+        }),
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    expect(result().status).toBe(400)
+    expect(JSON.parse(result().body)).toMatchObject({
+      error: {
+        type: "invalid_request_error",
+        code: "unsupported_tool",
+        param: "tools",
+      },
+    })
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 
   it("passes upstream 5xx errors as server_error", async () => {

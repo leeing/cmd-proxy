@@ -1,5 +1,6 @@
 import process from "node:process"
 
+import { OpenAiRequestError } from "./errors.ts"
 import { resolveModel } from "./models.ts"
 import type {
   CommandCodeContent,
@@ -17,6 +18,7 @@ import {
   getEnvironmentInfo,
   getGitContext,
   idWithPrefix,
+  imageContentFromDataUrl,
   isRecord,
   numberValue,
   recordOrEmpty,
@@ -49,7 +51,7 @@ export function convertResponsesRequestToCommandCode(
   const params: CommandCodeParams = {
     model: resolveModel(request.model ?? DEFAULT_MODEL),
     messages,
-    tools: convertTools(request.tools),
+    tools: request.tool_choice === "none" ? [] : convertTools(request.tools),
     system: systemParts.join("\n\n"),
     max_tokens: Math.min(request.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
     stream: true,
@@ -58,7 +60,9 @@ export function convertResponsesRequestToCommandCode(
   if (typeof request.temperature === "number") params.temperature = Math.min(request.temperature, 1)
   if (typeof request.top_p === "number") params.top_p = request.top_p
   if (typeof request.stop === "string" || Array.isArray(request.stop)) params.stop = request.stop
-  if (isRecord(request.tool_choice)) params.tool_choice = request.tool_choice
+  if (isRecord(request.tool_choice) || request.tool_choice === "required") {
+    params.tool_choice = request.tool_choice
+  }
   if (typeof request.parallel_tool_calls === "boolean") {
     params.parallel_tool_calls = request.parallel_tool_calls
   }
@@ -66,7 +70,10 @@ export function convertResponsesRequestToCommandCode(
     params.frequency_penalty = request.frequency_penalty
   if (typeof request.presence_penalty === "number")
     params.presence_penalty = request.presence_penalty
-  if (request.response_format) params.response_format = request.response_format
+  const textFormat = isRecord(request.text) ? request.text.format : undefined
+  if (textFormat !== undefined) params.response_format = normalizeResponseFormat(textFormat)
+  else if (request.response_format) params.response_format = request.response_format
+  if (typeof request.seed === "number") params.seed = request.seed
 
   const now = options.now ?? new Date()
   const git = getGitContext()
@@ -141,7 +148,7 @@ function appendMessageItem(
   const role = stringValue(item.role)
   const content = Array.isArray(item.content) ? item.content : []
 
-  if (role === "system") {
+  if (role === "system" || role === "developer") {
     const systemText = content.map(textFromContentBlock).filter(Boolean).join("\n")
     if (systemText) systemParts.push(systemText)
     return
@@ -179,7 +186,13 @@ function textFromContentBlock(block: unknown): string {
 
 function userContentBlock(block: unknown): CommandCodeContent[] {
   const text = textFromContentBlock(block)
-  return text ? [{ type: "text", text }] : []
+  if (text) return [{ type: "text", text }]
+  if (!isRecord(block) || block.type !== "input_image") return []
+  const imageUrl = isRecord(block.image_url)
+    ? stringValue(block.image_url.url)
+    : stringValue(block.image_url)
+  const image = imageUrl ? imageContentFromDataUrl(imageUrl) : undefined
+  return image ? [image] : []
 }
 
 function functionCallContent(
@@ -206,7 +219,12 @@ function convertTools(tools: unknown): CommandCodeTool[] {
   for (const tool of tools) {
     if (!isRecord(tool)) continue
     const type = stringValue(tool.type)
-    if (type && type !== "function" && type !== "custom") continue
+    if (type && type !== "function" && type !== "custom") {
+      throw new OpenAiRequestError(`Unsupported OpenAI Responses tool type: ${type}`, {
+        code: "unsupported_tool",
+        param: "tools",
+      })
+    }
 
     const fn = isRecord(tool.function) ? tool.function : undefined
     const name = stringValue(fn?.name) ?? stringValue(tool.name)
@@ -223,6 +241,14 @@ function convertTools(tools: unknown): CommandCodeTool[] {
   }
 
   return converted
+}
+
+function normalizeResponseFormat(format: unknown): unknown {
+  if (!isRecord(format) || format.type !== "json_schema" || format.json_schema !== undefined) {
+    return format
+  }
+  const { type: _type, ...jsonSchema } = format
+  return { type: "json_schema", json_schema: jsonSchema }
 }
 
 function commandCodeToolSchema(name: string, schema: unknown): unknown {
@@ -291,6 +317,7 @@ export function createResponsesStreamTranslator(
 
 interface ResponsesState {
   events: ResponsesStreamEvent[]
+  sequenceNumber: number
   responseId: string
   itemId: string
   model: string
@@ -322,6 +349,7 @@ function createResponsesState(options: {
 }): ResponsesState {
   return {
     events: [],
+    sequenceNumber: 0,
     responseId: options.responseId ?? idWithPrefix("resp"),
     itemId: idWithPrefix("item"),
     model: options.model ?? DEFAULT_MODEL,
@@ -341,9 +369,64 @@ function createResponsesState(options: {
   }
 }
 
+function addEvent(state: ResponsesState, event: ResponsesStreamEvent): void {
+  state.events.push({ ...event, sequence_number: state.sequenceNumber })
+  state.sequenceNumber += 1
+}
+
+function responseObject(
+  state: ResponsesState,
+  status: "in_progress" | "completed",
+  output: ResponsesOutputItem[],
+  usage?: ResponsesUsage,
+): NonNullable<ResponsesStreamEvent["response"]> {
+  return {
+    id: state.responseId,
+    object: "response",
+    created_at: state.createdAt,
+    model: state.model,
+    status,
+    output,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    max_output_tokens: null,
+    parallel_tool_calls: true,
+    previous_response_id: null,
+    text: { format: { type: "text" } },
+    tool_choice: "auto",
+    tools: [],
+    temperature: 1,
+    top_p: 1,
+    truncation: "disabled",
+    metadata: {},
+    ...(usage ? { usage } : {}),
+  }
+}
+
+function openAiStreamError(
+  event: CommandCodeStreamEvent,
+): NonNullable<ResponsesStreamEvent["error"]> {
+  const error = isRecord(event.error) ? event.error : event
+  return {
+    message: stringValue(error.message) ?? "Upstream stream error",
+    type: stringValue(error.type) ?? "server_error",
+    code: stringValue(error.code) ?? null,
+    param: stringValue(error.param) ?? null,
+  }
+}
+
 function handleCommandCodeEvent(state: ResponsesState, event: CommandCodeStreamEvent): void {
   const type = stringValue(event.type)
   if (!type) return
+
+  if (type === "error") {
+    addEvent(state, {
+      type: "error",
+      error: openAiStreamError(event),
+    })
+    return
+  }
 
   if (type === "text-delta") {
     ensureCreated(state)
@@ -356,7 +439,7 @@ function handleCommandCodeEvent(state: ResponsesState, event: CommandCodeStreamE
     startReasoning(state)
     const delta = stringValue(event.text) ?? ""
     state.reasoningContent += delta
-    state.events.push({
+    addEvent(state, {
       type: "response.reasoning_text.delta",
       output_index: state.reasoningOutputIndex,
       content_index: 0,
@@ -425,23 +508,20 @@ function handleCommandCodeEvent(state: ResponsesState, event: CommandCodeStreamE
 
 function ensureCreated(state: ResponsesState): void {
   if (state.sentCreated) return
-  state.events.push({
+  addEvent(state, {
     type: "response.created",
-    response: {
-      id: state.responseId,
-      object: "response",
-      created_at: state.createdAt,
-      model: state.model,
-      status: "in_progress",
-      output: [],
-    },
+    response: responseObject(state, "in_progress", []),
+  })
+  addEvent(state, {
+    type: "response.in_progress",
+    response: responseObject(state, "in_progress", []),
   })
   state.sentCreated = true
 }
 
 function appendTextDelta(state: ResponsesState, delta: string): void {
   if (!state.textOpen) {
-    state.events.push({
+    addEvent(state, {
       type: "response.output_item.added",
       output_index: state.outputIndex,
       item: {
@@ -452,7 +532,7 @@ function appendTextDelta(state: ResponsesState, delta: string): void {
         content: [],
       },
     })
-    state.events.push({
+    addEvent(state, {
       type: "response.content_part.added",
       output_index: state.outputIndex,
       content_index: 0,
@@ -462,7 +542,7 @@ function appendTextDelta(state: ResponsesState, delta: string): void {
   }
 
   state.textContent += delta
-  state.events.push({
+  addEvent(state, {
     type: "response.output_text.delta",
     output_index: state.outputIndex,
     content_index: 0,
@@ -479,19 +559,19 @@ function closeText(state: ResponsesState): void {
     role: "assistant",
     content: [{ type: "output_text", text: state.textContent }],
   }
-  state.events.push({
+  addEvent(state, {
     type: "response.output_text.done",
     output_index: state.outputIndex,
     content_index: 0,
     text: state.textContent,
   })
-  state.events.push({
+  addEvent(state, {
     type: "response.content_part.done",
     output_index: state.outputIndex,
     content_index: 0,
     part: { type: "output_text", text: state.textContent },
   })
-  state.events.push({ type: "response.output_item.done", output_index: state.outputIndex, item })
+  addEvent(state, { type: "response.output_item.done", output_index: state.outputIndex, item })
   state.output.push(item)
   state.outputIndex += 1
   state.textOpen = false
@@ -503,7 +583,7 @@ function startReasoning(state: ResponsesState): void {
     state.reasoningOutputIndex = state.outputIndex
     state.outputIndex += 1
   }
-  state.events.push({
+  addEvent(state, {
     type: "response.output_item.added",
     output_index: state.reasoningOutputIndex,
     item: {
@@ -518,7 +598,7 @@ function startReasoning(state: ResponsesState): void {
 
 function closeReasoning(state: ResponsesState): void {
   if (!state.reasoningOpen) return
-  state.events.push({
+  addEvent(state, {
     type: "response.reasoning_text.done",
     output_index: state.reasoningOutputIndex,
     content_index: 0,
@@ -530,7 +610,7 @@ function closeReasoning(state: ResponsesState): void {
     status: "completed",
     summary: state.reasoningContent ? [{ type: "summary_text", text: state.reasoningContent }] : [],
   }
-  state.events.push({
+  addEvent(state, {
     type: "response.output_item.done",
     output_index: state.reasoningOutputIndex,
     item,
@@ -566,7 +646,7 @@ function startToolCall(
   const outputIndex = state.outputIndex
   state.outputIndex += 1
   state.toolCalls.set(callId, { item, outputIndex, rawInput: "" })
-  state.events.push({ type: "response.output_item.added", output_index: outputIndex, item })
+  addEvent(state, { type: "response.output_item.added", output_index: outputIndex, item })
 }
 
 function appendToolDelta(state: ResponsesState, id: string | undefined, delta: string): void {
@@ -578,7 +658,7 @@ function appendToolDelta(state: ResponsesState, id: string | undefined, delta: s
   }
 
   item.arguments = `${item.arguments ?? ""}${delta}`
-  state.events.push({
+  addEvent(state, {
     type: "response.function_call_arguments.delta",
     output_index: toolCall.outputIndex,
     delta,
@@ -590,13 +670,13 @@ function finishToolArguments(state: ResponsesState, id: string | undefined): voi
   if (toolCall.item.type === "custom_tool_call") {
     const input = customInputText(recordOrEmpty(toolCall.rawInput), toolCall.rawInput)
     toolCall.item.input = input
-    state.events.push({
+    addEvent(state, {
       type: "response.custom_tool_call_input.delta",
       output_index: toolCall.outputIndex,
       item_id: toolCall.item.id,
       delta: input,
     })
-    state.events.push({
+    addEvent(state, {
       type: "response.custom_tool_call_input.done",
       output_index: toolCall.outputIndex,
       item_id: toolCall.item.id,
@@ -605,7 +685,7 @@ function finishToolArguments(state: ResponsesState, id: string | undefined): voi
     return
   }
 
-  state.events.push({
+  addEvent(state, {
     type: "response.function_call_arguments.done",
     output_index: toolCall.outputIndex,
     arguments: toolCall.item.arguments ?? "",
@@ -629,7 +709,7 @@ function completeToolCall(
     if (!item.arguments || item.arguments !== args) item.arguments = args
   }
   item.status = "completed"
-  state.events.push({ type: "response.output_item.done", output_index: toolCall.outputIndex, item })
+  addEvent(state, { type: "response.output_item.done", output_index: toolCall.outputIndex, item })
   state.output = Array.from(state.toolCalls.values())
     .sort((left, right) => left.outputIndex - right.outputIndex)
     .filter((entry) => entry.item.status === "completed")
@@ -687,17 +767,9 @@ function completeResponse(state: ResponsesState): void {
   if (state.sentCompleted) return
   closeText(state)
   closeReasoning(state)
-  state.events.push({
+  addEvent(state, {
     type: "response.completed",
-    response: {
-      id: state.responseId,
-      object: "response",
-      created_at: state.createdAt,
-      model: state.model,
-      status: "completed",
-      output: state.output,
-      usage: state.usage,
-    },
+    response: responseObject(state, "completed", state.output, state.usage),
   })
   state.sentCompleted = true
 }

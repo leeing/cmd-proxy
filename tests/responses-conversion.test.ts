@@ -56,6 +56,29 @@ describe("convertResponsesRequestToCommandCode", () => {
     expect(result.params.messages[0]?.role).toBe("user")
   })
 
+  it("treats developer input messages as system instructions", () => {
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: [
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "Follow repo conventions." }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Hello" }],
+        },
+      ],
+    })
+
+    expect(result.params.system).toBe("Follow repo conventions.")
+    expect(result.params.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "Hello" }] },
+    ])
+  })
+
   it("infers function_call_output toolName from prior function_call call_id", () => {
     const result = convertResponsesRequestToCommandCode({
       model: "deepseek-v4-pro",
@@ -116,6 +139,28 @@ describe("convertResponsesRequestToCommandCode", () => {
     expect(result.params.tool_choice).toBeUndefined()
   })
 
+  it("maps tool_choice none to an empty tool set", () => {
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: "hi",
+      tools: [{ type: "function", name: "read_file" }],
+      tool_choice: "none",
+    })
+
+    expect(result.params.tools).toEqual([])
+    expect(result.params.tool_choice).toBeUndefined()
+  })
+
+  it("forwards seed", () => {
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: "hi",
+      seed: 1234,
+    })
+
+    expect(result.params.seed).toBe(1234)
+  })
+
   it("maps apply_patch to a patch string schema for Command Code", () => {
     const result = convertResponsesRequestToCommandCode({
       model: "deepseek-v4-pro",
@@ -162,6 +207,52 @@ describe("convertResponsesRequestToCommandCode", () => {
     expect(result.params.presence_penalty).toBe(0.2)
     expect(result.params.response_format).toEqual({ type: "json_object" })
   })
+
+  it("maps Responses text.format to Command Code response_format", () => {
+    const jsonSchema = {
+      name: "answer",
+      schema: { type: "object", properties: { answer: { type: "string" } } },
+    }
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: "hi",
+      response_format: { type: "json_object" },
+      text: { format: { type: "json_schema", ...jsonSchema } },
+    })
+
+    expect(result.params.response_format).toEqual({ type: "json_schema", json_schema: jsonSchema })
+  })
+
+  it("converts Responses input_image data URLs into Command Code image content", () => {
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "inspect" },
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ],
+        },
+      ],
+    })
+
+    expect(result.params.messages[0]?.content).toEqual([
+      { type: "text", text: "inspect" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+    ])
+  })
+
+  it("rejects unsupported Responses built-in tools instead of dropping them", () => {
+    expect(() =>
+      convertResponsesRequestToCommandCode({
+        model: "deepseek-v4-pro",
+        input: "hi",
+        tools: [{ type: "web_search_preview" }],
+      }),
+    ).toThrow("Unsupported OpenAI Responses tool type: web_search_preview")
+  })
 })
 
 describe("responsesEventsFromCommandCodeEvents", () => {
@@ -177,6 +268,28 @@ describe("responsesEventsFromCommandCodeEvents", () => {
     expect(
       events.some((e) => e.type === "response.output_item.added" && e.item?.type === "reasoning"),
     ).toBe(true)
+  })
+
+  it("emits response.in_progress immediately after response.created with sequence numbers", () => {
+    const events = responsesEventsFromCommandCodeEvents([
+      { type: "text-delta", text: "hello" },
+      { type: "finish", finishReason: "stop" },
+    ])
+
+    expect(eventTypes(events).slice(0, 2)).toEqual(["response.created", "response.in_progress"])
+    expect(events[0]?.sequence_number).toBe(0)
+    expect(events[1]?.sequence_number).toBe(1)
+  })
+
+  it("converts upstream stream errors to OpenAI error events", () => {
+    const events = responsesEventsFromCommandCodeEvents([
+      { type: "text-delta", text: "hello" },
+      { type: "error", error: { message: "boom", type: "server_error", code: "upstream" } },
+    ])
+
+    expect(events.find((event) => event.type === "error")).toMatchObject({
+      error: { message: "boom", type: "server_error", code: "upstream" },
+    })
   })
 
   it("emits reasoning item with summary in final output", () => {

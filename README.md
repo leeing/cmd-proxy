@@ -68,9 +68,10 @@ DeepSeek / Claude / GPT / 其他后端模型
 
 - **Responses API**：`input`、`instructions`、`tools` → `messages`、`system`、`tools`
 - **Chat Completions**：`messages`、`tools` → `messages`、`system`、`tools`
-- **Anthropic Messages**：`system`、`messages`、`tools`、`tool_choice` → 对应字段
+- **Anthropic Messages**：`system`、`messages`、`tools`、`tool_choice`、`metadata`、`service_tier` → 对应字段
 
-通用参数（`temperature`、`top_p`、`stop`、`tool_choice`、`parallel_tool_calls` 等）透传保留。
+通用参数（`temperature`、`top_p`、`top_k`、`stop`、`tool_choice`、`parallel_tool_calls`、`seed` 等）透传保留。
+其中 `temperature` 会按上游能力限制 clamp 到 `0~1`。
 
 ### 2. 工具调用转换
 
@@ -95,7 +96,10 @@ DeepSeek / Claude / GPT / 其他后端模型
 |----------|-----------------|------------------|-------------------|
 | `text-delta` | `output_text.delta` | `choices[0].delta.content` | `content_block_delta` |
 | `tool-input-start/delta/end` | `function_call` / `custom_tool_call` | `tool_calls[]` delta | `content_block_start/delta/stop` (tool_use) |
-| `reasoning-delta` | reasoning item | `reasoning_content` delta | thinking block |
+| `reasoning-delta` / `reasoning-signature-delta` | reasoning item | `reasoning_content` delta | thinking block / signature_delta |
+| `usage-start` / `usage` | - | - | early message_start usage |
+| `ping` | - | - | `ping` event |
+| `error` | `error` event | - | `error` event |
 | `finish` | `response.completed` | stop reason + usage | `message_delta` + `message_stop` |
 
 转换器采用 **push/finish 状态机**模式：每个协议实现一个 `createStreamTranslator()` 工厂，返回 `{ push(event), finish() }` 对象。`push()` 累积上游事件并返回自上次调用以来新产生的输出事件，`finish()` 处理流结束收尾。同一转换器可复用于流式和非流式两种路径。
@@ -118,6 +122,8 @@ POST /v1/chat/completions
 POST /chat/completions
 POST /v1/messages
 POST /messages
+POST /v1/messages/count_tokens
+POST /messages/count_tokens
 ```
 
 ## 环境要求
@@ -235,7 +241,7 @@ pnpm test
 
 ## 已实现功能
 
-- **Anthropic Messages**：extended thinking、prompt caching（cache_control 直传 + cache 用量回读）、图片 base64 直传、reasoning-delta 映射为 thinking block
+- **Anthropic Messages**：extended thinking（含上游 signature delta 时透传）、prompt caching（用户内容/tool/tool_result cache_control 直传 + cache 用量回读）、图片 base64/url 直传、文本 document 转换、metadata/service_tier 转发、top_k、reasoning-delta 映射为 thinking block、流内 ping/error event、`anthropic-version`/`anthropic-beta`/`request-id` 响应头、Anthropic 错误类型映射、Messages 请求严格校验、beta feature gate、本地估算版 `count_tokens`
 - **OpenAI Responses**：reasoning 映射为 reasoning item、previous_response_id 对话连续性、responses storage 5 个端点（CRUD + cancel + compact + input_tokens）
 - **OpenAI Chat Completions**：reasoning 映射为 reasoning_content、frequency_penalty / presence_penalty / response_format 转发、stream_options.include_usage 控制
 - **HTTP**：SSE ping 保活（15s）、上游请求超时（可配）、AbortController 取消、pass_through 密钥校验
@@ -243,8 +249,16 @@ pnpm test
 
 ## 当前限制
 
-- 图片、多模态、web search 等能力取决于上游模型支持。
-- prompt caching 需上游模型实际支持 `cache_control`，否则参数被忽略。
+- 图片、多模态等能力取决于上游模型支持；OpenAI Chat/Responses 的 data URL 图片会转换为上游 base64 图片块。
+- OpenAI Responses 内建工具（如 `web_search_preview`、`file_search`、`code_interpreter`、MCP 等）当前不做静默降级；请求会返回明确的 unsupported tool 错误，待上游提供对应能力后再映射。
+- Anthropic server tools / MCP / web search 工具当前不做静默降级；请求会返回明确的 unsupported tool 错误，待上游提供对应能力后再映射。
+- Anthropic `mcp_servers` 和 `context_management` 会先检查对应 `anthropic-beta`；beta 已启用但代理尚未实现后端语义时，仍会返回明确的 unsupported request field 错误。
+- Anthropic `container`、`output_config` 依赖 Anthropic 原生会话/结构化输出后端语义，当前会返回明确的 unsupported request field 错误。
+- Anthropic `count_tokens` 当前是本地估算，不代表 Anthropic 官方 tokenizer 或上游模型 tokenizer 的精确结果；主要用于 Claude SDK/Claude Code 的协议探测和预算粗估。
+- Anthropic document 目前只支持 `source.type = "text"` 并折叠为文本上下文；PDF、base64 document、URL document、citations 不做伪造。
+- prompt caching 需上游模型实际支持 `cache_control`，否则参数被忽略；Anthropic system block 的 `cache_control` 目前无法在上游 string-only system 字段中完整保留。
+- Anthropic `message_start.usage` 只有在上游先发送 `usage-start`/`usage` 事件时才可准确；若上游只在 finish 事件返回 usage，最终 response usage 准确，但 `message_start` 会先显示 0。
+- Anthropic extended thinking 的 `signature_delta` 依赖上游提供 `reasoning-signature-delta` 或 `reasoning-end.signature`；未提供时无法完整模拟官方签名。
 - `n > 1`（多选）、`logprobs`、`logit_bias` 暂不转发（上游不支持）。
 
 ## Docker 部署

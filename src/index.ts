@@ -5,11 +5,13 @@ import pino from "pino"
 
 import { loadConfig } from "./config.ts"
 import { createProxyServer } from "./http.ts"
+import { initModelMap } from "./models.ts"
 
 const SHUTDOWN_TIMEOUT_MS = 10_000
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env)
+  initModelMap(config.customModelMap)
   const logger = pino({ level: config.logLevel })
   const server = createProxyServer({ config, logger })
 

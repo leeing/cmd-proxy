@@ -55,6 +55,21 @@ describe("convertChatCompletionRequestToCommandCode", () => {
     expect(result.params.temperature).toBe(0.1)
   })
 
+  it("treats developer messages as system instructions", () => {
+    const result = convertChatCompletionRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      messages: [
+        { role: "developer", content: "Follow repo conventions." },
+        { role: "user", content: "hi" },
+      ],
+    })
+
+    expect(result.params.system).toBe("Follow repo conventions.")
+    expect(result.params.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+    ])
+  })
+
   it("does not forward string tool_choice values to Command Code", () => {
     const result = convertChatCompletionRequestToCommandCode({
       model: "deepseek-v4-pro",
@@ -63,6 +78,31 @@ describe("convertChatCompletionRequestToCommandCode", () => {
     })
 
     expect(result.params.tool_choice).toBeUndefined()
+  })
+
+  it("maps tool_choice none to an empty tool set", () => {
+    const result = convertChatCompletionRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "function", function: { name: "read_file" } }],
+      tool_choice: "none",
+    })
+
+    expect(result.params.tools).toEqual([])
+    expect(result.params.tool_choice).toBeUndefined()
+  })
+
+  it("forwards max_completion_tokens before max_tokens and seed", () => {
+    const result = convertChatCompletionRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 10,
+      max_completion_tokens: 42,
+      seed: 1234,
+    })
+
+    expect(result.params.max_tokens).toBe(42)
+    expect(result.params.seed).toBe(1234)
   })
 
   it("normalizes non-object function parameters to object schemas for Command Code", () => {
@@ -115,6 +155,26 @@ describe("convertChatCompletionRequestToCommandCode", () => {
       json_schema: jsonSchema,
     })
   })
+
+  it("converts chat image_url data URLs into Command Code image content", () => {
+    const result = convertChatCompletionRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "inspect" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+          ],
+        },
+      ],
+    })
+
+    expect(result.params.messages[0]?.content).toEqual([
+      { type: "text", text: "inspect" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+    ])
+  })
 })
 
 describe("chatCompletionChunksFromCommandCodeEvents", () => {
@@ -143,11 +203,48 @@ describe("chatCompletionChunksFromCommandCodeEvents", () => {
         .map((toolCall) => toolCall.function?.arguments ?? "")
         .join(""),
     ).toContain('{"path":"README.md"}')
-    expect(chunks.at(-1)?.choices[0]?.finish_reason).toBe("tool_calls")
+    expect(chunks.findLast((chunk) => chunk.choices.length > 0)?.choices[0]?.finish_reason).toBe(
+      "tool_calls",
+    )
     expect(chunks.at(-1)?.usage).toEqual({
       prompt_tokens: 5,
       completion_tokens: 3,
       total_tokens: 8,
+    })
+  })
+
+  it("omits stream usage chunks unless includeUsage is enabled", () => {
+    const chunks = chatCompletionChunksFromCommandCodeEvents(
+      [
+        { type: "text-delta", text: "hello" },
+        {
+          type: "finish",
+          finishReason: "stop",
+          totalUsage: { inputTokens: 5, outputTokens: 3 },
+        },
+      ],
+      { completionId: "chatcmpl_test", model: "deepseek-v4-pro", created: 1, includeUsage: false },
+    )
+
+    expect(chunks.some((chunk) => chunk.usage !== undefined)).toBe(false)
+  })
+
+  it("emits a final empty-choice usage chunk when includeUsage is enabled", () => {
+    const chunks = chatCompletionChunksFromCommandCodeEvents(
+      [
+        { type: "text-delta", text: "hello" },
+        {
+          type: "finish",
+          finishReason: "stop",
+          totalUsage: { inputTokens: 5, outputTokens: 3 },
+        },
+      ],
+      { completionId: "chatcmpl_test", model: "deepseek-v4-pro", created: 1, includeUsage: true },
+    )
+
+    expect(chunks.at(-1)).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
     })
   })
 

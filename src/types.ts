@@ -8,11 +8,16 @@ export type CommandCodeContent =
     }
   | {
       type: "image"
-      source: {
-        type: "base64"
-        media_type: string
-        data: string
-      }
+      source:
+        | {
+            type: "base64"
+            media_type: string
+            data: string
+          }
+        | {
+            type: "url"
+            url: string
+          }
     }
   | {
       type: "tool-call"
@@ -51,7 +56,11 @@ export interface CommandCodeParams {
   frequency_penalty?: number
   presence_penalty?: number
   thinking?: { type: "enabled"; budget_tokens: number }
-  response_format?: { type: "text" | "json_object" | "json_schema"; json_schema?: unknown }
+  response_format?: unknown
+  seed?: number
+  top_k?: number
+  metadata?: Record<string, unknown>
+  service_tier?: string
 }
 
 export interface CommandCodePayload {
@@ -97,7 +106,9 @@ export interface ResponsesRequest {
   previous_response_id?: string
   frequency_penalty?: number
   presence_penalty?: number
-  response_format?: { type: "text" | "json_object" | "json_schema"; json_schema?: unknown }
+  response_format?: unknown
+  text?: { format?: unknown }
+  seed?: number
 }
 
 export interface ResponsesUsage {
@@ -124,6 +135,13 @@ export interface ResponsesOutputItem {
 
 export interface ResponsesStreamEvent {
   type: string
+  sequence_number?: number
+  error?: {
+    message: string
+    type: string
+    code: string | null
+    param?: string | null
+  }
   response?: {
     id: string
     object: "response"
@@ -132,6 +150,19 @@ export interface ResponsesStreamEvent {
     status: "in_progress" | "completed"
     output: ResponsesOutputItem[]
     usage?: ResponsesUsage
+    error?: null
+    incomplete_details?: null
+    instructions?: string | null
+    max_output_tokens?: number | null
+    parallel_tool_calls?: boolean
+    previous_response_id?: string | null
+    text?: { format: unknown }
+    tool_choice?: unknown
+    tools?: unknown[]
+    temperature?: number | null
+    top_p?: number | null
+    truncation?: "disabled"
+    metadata?: Record<string, unknown>
   }
   output_index?: number
   content_index?: number

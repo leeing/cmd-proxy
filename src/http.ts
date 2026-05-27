@@ -16,12 +16,15 @@ import {
   parseCommandCodeStreamRemainder,
 } from "./command-code-stream.ts"
 import type { AppConfig } from "./config.ts"
+import { OpenAiRequestError } from "./errors.ts"
 import {
   type AnthropicMessageRequest,
   type AnthropicSseEvent,
   anthropicMessagesFromCommandCodeEvents,
   convertAnthropicRequestToCommandCode,
+  countAnthropicInputTokens,
   createAnthropicMessagesStreamTranslator,
+  isAnthropicRequestError,
 } from "./messages.ts"
 import { modelList } from "./models.ts"
 import type { ResponseStore } from "./response-store.ts"
@@ -69,6 +72,24 @@ export async function handleRequest(
           message: "Invalid JSON request body",
           type: "invalid_request_error",
           code: "invalid_json",
+          param: "body",
+        })
+      } else if (isAnthropicRequestError(error)) {
+        sendAnthropicError(
+          res,
+          error.status,
+          {
+            type: error.type,
+            message: error.message,
+          },
+          anthropicResponseHeaders(req),
+        )
+      } else if (error instanceof OpenAiRequestError) {
+        sendOpenAiError(res, error.status, {
+          message: error.message,
+          type: error.type,
+          code: error.code,
+          param: error.param,
         })
       } else {
         sendOpenAiError(res, 500, {
@@ -134,6 +155,14 @@ async function handleRequestInner(
 
   if (req.method === "POST" && (url === "/chat/completions" || url === "/v1/chat/completions")) {
     await handleChatCompletions(req, res, config, logger, fetchImpl)
+    return
+  }
+
+  if (
+    req.method === "POST" &&
+    (url === "/messages/count_tokens" || url === "/v1/messages/count_tokens")
+  ) {
+    await handleMessagesCountTokens(req, res)
     return
   }
 
@@ -510,16 +539,19 @@ async function streamCommandCodeToChatCompletionsInner(
   response: Response,
   res: ServerResponse,
   model: string | undefined,
-  _includeUsage: boolean,
+  includeUsage: boolean,
 ): Promise<void> {
   const reader = response.body?.getReader()
   if (!reader) {
-    for (const chunk of createChatCompletionStreamTranslator().finish()) writeSseData(res, chunk)
+    for (const chunk of createChatCompletionStreamTranslator({ includeUsage }).finish()) {
+      writeSseData(res, chunk)
+    }
     return
   }
 
   const translator = createChatCompletionStreamTranslator({
     ...(model ? { model } : {}),
+    includeUsage,
   })
   const decoder = new TextDecoder()
   let buffer = ""
@@ -553,9 +585,9 @@ function sendJson(
 function sendOpenAiError(
   res: ServerResponse,
   status: number,
-  error: { message: string; type: string; code: string },
+  error: { message: string; type: string; code: string; param?: string | null },
 ): void {
-  sendJson(res, status, { error: { ...error, param: null } })
+  sendJson(res, status, { error: { ...error, param: error.param ?? null } })
 }
 
 async function handleMessages(
@@ -565,32 +597,36 @@ async function handleMessages(
   logger: Logger,
   fetchImpl: typeof fetch,
 ): Promise<void> {
+  const anthropicHeaders = anthropicResponseHeaders(req)
   const request = await readJsonBody(req)
   if (!isRecord(request)) {
-    sendAnthropicError(res, 400, {
-      type: "invalid_request_error",
-      message: "Request body must be a JSON object",
-    })
+    sendAnthropicError(
+      res,
+      400,
+      {
+        type: "invalid_request_error",
+        message: "Request body must be a JSON object",
+      },
+      anthropicHeaders,
+    )
     return
   }
-
-  // Anthropic requires request header anthropic-version
-  const anthropicVersion = req.headers["anthropic-version"] ?? "2023-06-01"
 
   const messagesRequest = request as AnthropicMessageRequest
   const commandCodePayload = convertAnthropicRequestToCommandCode(messagesRequest, {
     memory: config.memory,
     taste: config.taste,
+    betaHeaders: anthropicBetaHeaders(req),
   })
   const upstream = await fetchCommandCode(req, config, fetchImpl, commandCodePayload)
 
   if (!upstream.ok) {
-    await sendUpstreamAnthropicError(upstream, res, logger)
+    await sendUpstreamAnthropicError(upstream, res, logger, anthropicHeaders)
     return
   }
 
   if (messagesRequest.stream !== false) {
-    sendAnthropicSseHeaders(res)
+    sendAnthropicSseHeaders(res, anthropicHeaders)
     await streamCommandCodeToMessages(upstream, res, messagesRequest.model)
     res.end()
   } else {
@@ -599,8 +635,30 @@ async function handleMessages(
       ...(messagesRequest.model ? { model: messagesRequest.model } : {}),
     })
     res.setHeader("x-api-key", req.headers["x-api-key"] ?? "")
-    sendJson(res, 200, response, { "anthropic-version": String(anthropicVersion) })
+    sendJson(res, 200, response, anthropicHeaders)
   }
+}
+
+async function handleMessagesCountTokens(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const anthropicHeaders = anthropicResponseHeaders(req)
+  const request = await readJsonBody(req)
+  if (!isRecord(request)) {
+    sendAnthropicError(
+      res,
+      400,
+      {
+        type: "invalid_request_error",
+        message: "Request body must be a JSON object",
+      },
+      anthropicHeaders,
+    )
+    return
+  }
+
+  const response = countAnthropicInputTokens(request as AnthropicMessageRequest, {
+    betaHeaders: anthropicBetaHeaders(req),
+  })
+  sendJson(res, 200, response, anthropicHeaders)
 }
 
 async function streamCommandCodeToMessages(
@@ -665,30 +723,40 @@ function sendAnthropicError(
   res: ServerResponse,
   status: number,
   error: { type: string; message: string },
+  extraHeaders: Record<string, string> = { "anthropic-version": "2023-06-01" },
 ): void {
-  sendJson(res, status, { type: "error", error }, { "anthropic-version": "2023-06-01" })
+  sendJson(res, status, { type: "error", error }, extraHeaders)
 }
 
 async function sendUpstreamAnthropicError(
   upstream: Response,
   res: ServerResponse,
   logger: Logger,
+  extraHeaders: Record<string, string>,
 ): Promise<void> {
   const body = await upstream.text().catch((error: unknown) => errorMessage(error))
   logger.warn(
     { status: upstream.status, body: body.slice(0, 500) },
     "Command Code upstream error (Messages)",
   )
-  sendAnthropicError(res, upstream.status, {
-    type: anthropicErrorType(upstream.status),
-    message: `Command Code API error ${upstream.status}: ${body.slice(0, 500)}`,
-  })
+  sendAnthropicError(
+    res,
+    upstream.status,
+    {
+      type: anthropicErrorType(upstream.status),
+      message: `Command Code API error ${upstream.status}: ${body.slice(0, 500)}`,
+    },
+    extraHeaders,
+  )
 }
 
 function anthropicErrorType(status: number): string {
-  if (status === 401 || status === 403) return "authentication_error"
+  if (status === 401) return "authentication_error"
+  if (status === 403) return "permission_error"
+  if (status === 404) return "not_found_error"
+  if (status === 413) return "request_too_large"
   if (status === 429) return "rate_limit_error"
-  if (status >= 500) return "server_error"
+  if (status >= 500) return "api_error"
   return "invalid_request_error"
 }
 
@@ -707,13 +775,17 @@ function startSsePing(res: ServerResponse): () => void {
   return () => clearInterval(interval)
 }
 
-function sendAnthropicSseHeaders(res: ServerResponse): void {
+function sendAnthropicSseHeaders(
+  res: ServerResponse,
+  extraHeaders: Record<string, string> = { "anthropic-version": "2023-06-01" },
+): void {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
     ...corsHeaders(),
+    ...extraHeaders,
   })
   res.flushHeaders()
 }
@@ -765,9 +837,29 @@ function corsHeaders(): Record<string, string> {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, openai-organization, openai-project, anthropic-version, x-api-key, x-stainless-arch, x-stainless-lang, x-stainless-os, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version",
+      "Content-Type, Authorization, openai-organization, openai-project, anthropic-version, anthropic-beta, x-api-key, x-stainless-arch, x-stainless-lang, x-stainless-os, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version",
     "Access-Control-Max-Age": "86400",
   }
+}
+
+function anthropicResponseHeaders(req: IncomingMessage): Record<string, string> {
+  const headers: Record<string, string> = {
+    "anthropic-version": String(req.headers["anthropic-version"] ?? "2023-06-01"),
+    "request-id": `req_${randomUUID()}`,
+  }
+  const beta = req.headers["anthropic-beta"]
+  if (typeof beta === "string" && beta.length > 0) headers["anthropic-beta"] = beta
+  return headers
+}
+
+function anthropicBetaHeaders(req: IncomingMessage): string[] {
+  const beta = req.headers["anthropic-beta"]
+  const raw = Array.isArray(beta) ? beta.join(",") : beta
+  if (typeof raw !== "string") return []
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0)
 }
 
 function apiKeyFromRequest(req: IncomingMessage): string | undefined {

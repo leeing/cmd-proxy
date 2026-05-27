@@ -13,6 +13,7 @@ import {
   getEnvironmentInfo,
   getGitContext,
   idWithPrefix,
+  imageContentFromDataUrl,
   isRecord,
   numberValue,
   recordOrEmpty,
@@ -29,6 +30,7 @@ export interface ChatCompletionRequest {
   messages?: ChatMessage[]
   tools?: unknown
   max_tokens?: number
+  max_completion_tokens?: number
   stream?: boolean
   temperature?: number
   top_p?: number
@@ -39,9 +41,11 @@ export interface ChatCompletionRequest {
   presence_penalty?: number
   response_format?: { type: "text" | "json_object" | "json_schema"; json_schema?: unknown }
   stream_options?: { include_usage?: boolean }
+  seed?: number
 }
 
 type ChatMessage =
+  | { role: "developer"; content?: unknown }
   | { role: "system"; content?: unknown }
   | { role: "user"; content?: unknown }
   | { role: "assistant"; content?: unknown; tool_calls?: unknown }
@@ -122,16 +126,21 @@ export function convertChatCompletionRequestToCommandCode(
   const params: CommandCodeParams = {
     model: resolveModel(request.model ?? DEFAULT_MODEL),
     messages,
-    tools: convertChatTools(request.tools),
+    tools: request.tool_choice === "none" ? [] : convertChatTools(request.tools),
     system: systemParts.join("\n\n"),
-    max_tokens: Math.min(request.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_TOKENS),
+    max_tokens: Math.min(
+      request.max_completion_tokens ?? request.max_tokens ?? DEFAULT_MAX_TOKENS,
+      MAX_TOKENS,
+    ),
     stream: true,
   }
 
   if (typeof request.temperature === "number") params.temperature = Math.min(request.temperature, 1)
   if (typeof request.top_p === "number") params.top_p = request.top_p
   if (typeof request.stop === "string" || Array.isArray(request.stop)) params.stop = request.stop
-  if (isRecord(request.tool_choice)) params.tool_choice = request.tool_choice
+  if (isRecord(request.tool_choice) || request.tool_choice === "required") {
+    params.tool_choice = request.tool_choice
+  }
   if (typeof request.parallel_tool_calls === "boolean") {
     params.parallel_tool_calls = request.parallel_tool_calls
   }
@@ -140,6 +149,7 @@ export function convertChatCompletionRequestToCommandCode(
   if (typeof request.presence_penalty === "number")
     params.presence_penalty = request.presence_penalty
   if (request.response_format) params.response_format = request.response_format
+  if (typeof request.seed === "number") params.seed = request.seed
 
   const now = options.now ?? new Date()
   const git = getGitContext()
@@ -169,15 +179,15 @@ function appendChatMessage(
   systemParts: string[],
   toolNamesByCallId: Map<string, string>,
 ): void {
-  if (message.role === "system") {
+  if (message.role === "system" || message.role === "developer") {
     const text = chatContentText(message.content)
     if (text) systemParts.push(text)
     return
   }
 
   if (message.role === "user") {
-    const text = chatContentText(message.content)
-    if (text) messages.push({ role: "user", content: [{ type: "text", text }] })
+    const content = chatContentBlocks(message.content)
+    if (content.length > 0) messages.push({ role: "user", content })
     return
   }
 
@@ -218,6 +228,27 @@ function chatContentText(content: unknown): string {
     })
     .filter(Boolean)
     .join("\n")
+}
+
+function chatContentBlocks(content: unknown): CommandCodeContent[] {
+  if (typeof content === "string") return content ? [{ type: "text", text: content }] : []
+  if (!Array.isArray(content)) return []
+  return content.flatMap((part): CommandCodeContent[] => {
+    if (typeof part === "string") return part ? [{ type: "text", text: part }] : []
+    if (!isRecord(part)) return []
+    if (part.type === "text") {
+      const text = stringValue(part.text)
+      return text ? [{ type: "text", text }] : []
+    }
+    if (part.type === "image_url") {
+      const imageUrl = isRecord(part.image_url)
+        ? stringValue(part.image_url.url)
+        : stringValue(part.image_url)
+      const image = imageUrl ? imageContentFromDataUrl(imageUrl) : undefined
+      return image ? [image] : []
+    }
+    return []
+  })
 }
 
 function chatToolCalls(
@@ -262,7 +293,7 @@ function convertChatTools(tools: unknown): CommandCodeTool[] {
 
 export function chatCompletionChunksFromCommandCodeEvents(
   commandCodeEvents: CommandCodeStreamEvent[],
-  options: { completionId?: string; model?: string; created?: number } = {},
+  options: { completionId?: string; model?: string; created?: number; includeUsage?: boolean } = {},
 ): ChatCompletionChunk[] {
   const translator = createChatCompletionStreamTranslator(options)
   const chunks: ChatCompletionChunk[] = []
@@ -277,7 +308,7 @@ export interface ChatCompletionStreamTranslator {
 }
 
 export function createChatCompletionStreamTranslator(
-  options: { completionId?: string; model?: string; created?: number } = {},
+  options: { completionId?: string; model?: string; created?: number; includeUsage?: boolean } = {},
 ): ChatCompletionStreamTranslator {
   const state: ChatState = {
     chunks: [],
@@ -287,6 +318,7 @@ export function createChatCompletionStreamTranslator(
     sentRole: false,
     finishReason: null,
     usage: undefined,
+    includeUsage: options.includeUsage ?? true,
     toolIndexes: new Map(),
     nextToolIndex: 0,
   }
@@ -316,6 +348,7 @@ interface ChatState {
   sentRole: boolean
   finishReason: "stop" | "length" | "tool_calls" | null
   usage: ChatCompletionUsage | undefined
+  includeUsage: boolean
   toolIndexes: Map<string, number>
   nextToolIndex: number
 }
@@ -389,6 +422,7 @@ function handleChatEvent(state: ChatState, event: CommandCodeStreamEvent): void 
     state.usage = chatUsageFromFinish(event)
     const finishReason = mapChatFinishReason(event.finishReason)
     pushChunk(state, {}, finishReason)
+    if (state.includeUsage) pushUsageChunk(state)
     state.finishReason = finishReason
   }
 }
@@ -411,8 +445,19 @@ function pushChunk(
     model: state.model,
     choices: [{ index: 0, delta, finish_reason: finishReason }],
   }
-  if (finishReason && state.usage) chunk.usage = state.usage
   state.chunks.push(chunk)
+}
+
+function pushUsageChunk(state: ChatState): void {
+  if (!state.usage) return
+  state.chunks.push({
+    id: state.completionId,
+    object: "chat.completion.chunk",
+    created: state.created,
+    model: state.model,
+    choices: [],
+    usage: state.usage,
+  })
 }
 
 function toolIndex(state: ChatState, id: string): number {
@@ -442,7 +487,8 @@ function mapChatFinishReason(reason: unknown): "stop" | "length" | "tool_calls" 
 }
 
 export function chatCompletionFromChunks(chunks: ChatCompletionChunk[]): ChatCompletionResponse {
-  const last = chunks.at(-1)
+  const last = chunks.findLast((chunk) => chunk.choices.length > 0) ?? chunks.at(-1)
+  const usageChunk = chunks.findLast((chunk) => chunk.usage !== undefined)
   const content = chunks.map((chunk) => chunk.choices[0]?.delta.content ?? "").join("")
   const toolCalls = aggregateToolCalls(chunks)
   return {
@@ -461,7 +507,7 @@ export function chatCompletionFromChunks(chunks: ChatCompletionChunk[]): ChatCom
         finish_reason: last?.choices[0]?.finish_reason ?? "stop",
       },
     ],
-    usage: last?.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    usage: usageChunk?.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   }
 }
 

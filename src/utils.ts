@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import process from "node:process"
 
-import type { JsonObject } from "./types.ts"
+import type { CommandCodeContent, JsonObject } from "./types.ts"
 
 export function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -34,6 +34,23 @@ export function recordOrEmpty(value: unknown): JsonObject {
 export function textFromUnknown(value: unknown): string {
   if (typeof value === "string") return value
   return JSON.stringify(value ?? "")
+}
+
+export function imageContentFromDataUrl(
+  url: string,
+): Extract<CommandCodeContent, { type: "image" }> | undefined {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(url)
+  if (!match) return undefined
+  const [, mediaType, data] = match
+  if (!mediaType || !data) return undefined
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: mediaType,
+      data,
+    },
+  }
 }
 
 export function idWithPrefix(prefix: string): string {
