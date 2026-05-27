@@ -97,14 +97,14 @@ describe("convertResponsesRequestToCommandCode", () => {
     expect(result.params.parallel_tool_calls).toBe(true)
   })
 
-  it("forwards string tool_choice values to Command Code", () => {
+  it("does not forward string tool_choice values to Command Code", () => {
     const result = convertResponsesRequestToCommandCode({
       model: "deepseek-v4-pro",
       input: "hi",
       tool_choice: "auto",
     })
 
-    expect(result.params.tool_choice).toBe("auto")
+    expect(result.params.tool_choice).toBeUndefined()
   })
 
   it("maps apply_patch to a patch string schema for Command Code", () => {

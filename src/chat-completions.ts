@@ -131,8 +131,7 @@ export function convertChatCompletionRequestToCommandCode(
   if (typeof request.temperature === "number") params.temperature = request.temperature
   if (typeof request.top_p === "number") params.top_p = request.top_p
   if (typeof request.stop === "string" || Array.isArray(request.stop)) params.stop = request.stop
-  if (typeof request.tool_choice === "string" || isRecord(request.tool_choice))
-    params.tool_choice = request.tool_choice
+  if (isRecord(request.tool_choice)) params.tool_choice = request.tool_choice
   if (typeof request.parallel_tool_calls === "boolean") {
     params.parallel_tool_calls = request.parallel_tool_calls
   }
