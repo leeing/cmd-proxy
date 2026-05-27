@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   logger.info(
     {
       baseUrl: `http://localhost:${config.port}/v1`,
-      upstream: config.commandCodeApiBase,
+      upstream: config.apiBase,
     },
     "cmd-proxy listening",
   )
