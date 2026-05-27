@@ -6,19 +6,9 @@ describe("resolveModel", () => {
   it("resolves known aliases to full provider paths", () => {
     expect(resolveModel("deepseek-v4-pro")).toBe("deepseek/deepseek-v4-pro")
     expect(resolveModel("deepseek-v4-flash")).toBe("deepseek/deepseek-v4-flash")
-    expect(resolveModel("claude-sonnet-4-6")).toBe("claude-sonnet-4-6")
-    expect(resolveModel("claude-opus-4-7")).toBe("claude-opus-4-7")
-    expect(resolveModel("gpt-5.5")).toBe("gpt-5.5")
-  })
-
-  it("resolves short aliases", () => {
-    expect(resolveModel("deepseek-pro")).toBe("deepseek/deepseek-v4-pro")
-    expect(resolveModel("deepseek-flash")).toBe("deepseek/deepseek-v4-flash")
-  })
-
-  it("resolves version-agnostic aliases to latest", () => {
-    expect(resolveModel("claude-sonnet-4")).toBe("claude-sonnet-4-6")
-    expect(resolveModel("claude-opus-4")).toBe("claude-opus-4-7")
+    expect(resolveModel("kimi-k2.6")).toBe("moonshotai/Kimi-K2.6")
+    expect(resolveModel("glm-5.1")).toBe("zai-org/GLM-5.1")
+    expect(resolveModel("qwen-3.7-max")).toBe("Qwen/Qwen3.7-Max-Preview")
   })
 
   it("resolves case-insensitively", () => {
