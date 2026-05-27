@@ -128,7 +128,7 @@ export function convertChatCompletionRequestToCommandCode(
     stream: true,
   }
 
-  if (typeof request.temperature === "number") params.temperature = request.temperature
+  if (typeof request.temperature === "number") params.temperature = Math.min(request.temperature, 1)
   if (typeof request.top_p === "number") params.top_p = request.top_p
   if (typeof request.stop === "string" || Array.isArray(request.stop)) params.stop = request.stop
   if (isRecord(request.tool_choice)) params.tool_choice = request.tool_choice

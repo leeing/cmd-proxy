@@ -182,7 +182,7 @@ export function convertAnthropicRequestToCommandCode(
     stream: true,
   }
 
-  if (typeof request.temperature === "number") params.temperature = request.temperature
+  if (typeof request.temperature === "number") params.temperature = Math.min(request.temperature, 1)
   if (typeof request.top_p === "number") params.top_p = request.top_p
   if (request.stop_sequences && request.stop_sequences.length > 0) {
     params.stop = request.stop_sequences

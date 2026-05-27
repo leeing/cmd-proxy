@@ -93,6 +93,15 @@ describe("convertChatCompletionRequestToCommandCode", () => {
     expect(result.params.stop).toEqual(["END"])
   })
 
+  it("clamps temperature > 1 to 1", () => {
+    const result = convertChatCompletionRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: 2,
+    })
+    expect(result.params.temperature).toBe(1)
+  })
+
   it("forwards response_format to Command Code", () => {
     const jsonSchema = { type: "object", properties: { name: { type: "string" } } }
     const result = convertChatCompletionRequestToCommandCode({

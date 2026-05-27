@@ -97,6 +97,15 @@ describe("convertResponsesRequestToCommandCode", () => {
     expect(result.params.parallel_tool_calls).toBe(true)
   })
 
+  it("clamps temperature > 1 to 1", () => {
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: "hi",
+      temperature: 1.5,
+    })
+    expect(result.params.temperature).toBe(1)
+  })
+
   it("does not forward string tool_choice values to Command Code", () => {
     const result = convertResponsesRequestToCommandCode({
       model: "deepseek-v4-pro",

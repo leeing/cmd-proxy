@@ -40,6 +40,16 @@ describe("convertAnthropicRequestToCommandCode", () => {
     expect(result.params.max_tokens).toBe(4096)
   })
 
+  it("clamps temperature > 1 to 1", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 4096,
+      temperature: 2,
+    })
+    expect(result.params.temperature).toBe(1)
+  })
+
   it("converts system as content blocks into joined text", () => {
     const result = convertAnthropicRequestToCommandCode({
       model: "claude-sonnet-4-6",
