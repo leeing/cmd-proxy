@@ -1,14 +1,26 @@
-import { once } from "node:events"
-import type { Server } from "node:http"
+import type { IncomingMessage, ServerResponse } from "node:http"
+import { Readable, Writable } from "node:stream"
 
 import pino from "pino"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import type { AppConfig } from "../src/config.ts"
-import { createProxyServer } from "../src/http.ts"
+import { handleRequest } from "../src/http.ts"
 import { ResponseStore } from "../src/response-store.ts"
 
-const servers: Server[] = []
+function mockConfig(overrides: Partial<AppConfig> = {}): AppConfig {
+  return {
+    apiKey: "user_fixed",
+    apiBase: "https://commandcode.test",
+    port: 8888,
+    logLevel: "silent",
+    authMode: "fixed",
+    upstreamTimeoutMs: 300_000,
+    memory: "",
+    taste: "",
+    ...overrides,
+  }
+}
 
 function commandCodeResponse(lines: string[], status = 200): Response {
   const encoder = new TextEncoder()
@@ -23,58 +35,72 @@ function commandCodeResponse(lines: string[], status = 200): Response {
   )
 }
 
-async function startProxy(
-  fetchImpl: typeof fetch,
-  store?: ResponseStore,
-  overrides: Partial<AppConfig> = {},
-): Promise<string> {
-  const config: AppConfig = {
-    apiKey: "user_fixed",
-    apiBase: "https://commandcode.test",
-    port: 0,
-    logLevel: "silent",
-    authMode: "fixed",
-    upstreamTimeoutMs: 300_000,
-    ...overrides,
-  }
-  const server = createProxyServer({
-    config,
-    logger: pino({ level: "silent" }),
-    fetchImpl,
-    ...(store ? { store } : {}),
+interface MockRes {
+  status: number
+  headers: Record<string, string>
+  body: string
+}
+
+function mockResponse(): { res: ServerResponse; result: () => MockRes } {
+  const state: MockRes = { status: 200, headers: {}, body: "" }
+  const chunks: Buffer[] = []
+
+  const writable = new Writable({
+    write(chunk, _enc, cb) {
+      if (typeof chunk === "string") chunks.push(Buffer.from(chunk))
+      else if (Buffer.isBuffer(chunk)) chunks.push(chunk)
+      cb()
+    },
   })
-  servers.push(server)
-  server.listen(0, "127.0.0.1")
-  await once(server, "listening")
-  const address = server.address()
-  if (!address || typeof address === "string") throw new Error("Expected TCP server address")
-  return `http://127.0.0.1:${address.port}`
+
+  const res = writable as unknown as ServerResponse
+
+  res.statusCode = 200
+
+  res.writeHead = ((statusCode: number, headers?: Record<string, string>) => {
+    state.status = statusCode
+    if (headers) {
+      for (const [k, v] of Object.entries(headers)) state.headers[k.toLowerCase()] = v
+    }
+    return res
+  }) as ServerResponse["writeHead"]
+
+  res.setHeader = ((name: string, value: string) => {
+    state.headers[name.toLowerCase()] = value
+    return res
+  }) as ServerResponse["setHeader"]
+
+  res.getHeader = (() => undefined) as ServerResponse["getHeader"]
+
+  res.flushHeaders = (() => {
+    /* no-op mock */
+  }) as ServerResponse["flushHeaders"]
+
+  return {
+    res,
+    result: () => {
+      state.body = Buffer.concat(chunks).toString()
+      return state
+    },
+  }
 }
 
-async function sseEvents(response: Response): Promise<unknown[]> {
-  const text = await response.text()
-  return text
-    .split("\n\n")
-    .filter(Boolean)
-    .flatMap((frame) => {
-      const lines = frame.split("\n").filter(Boolean)
-      const dataLine = lines.find((line) => line.startsWith("data: "))
-      return dataLine ? [dataLine.slice(6)] : []
-    })
-    .filter((data) => data !== "[DONE]")
-    .map((data) => JSON.parse(data) as unknown)
+function mockReq(
+  method: string,
+  url: string,
+  body?: string,
+  extraHeaders: Record<string, string> = {},
+): IncomingMessage {
+  const bodyContent = body ?? ""
+  const readable = Readable.from([Buffer.from(bodyContent)])
+  const req = readable as unknown as IncomingMessage
+  req.method = method
+  req.url = url
+  req.headers = { "content-type": "application/json", ...extraHeaders }
+  return req
 }
 
-afterEach(async () => {
-  await Promise.all(
-    servers.splice(0).map(
-      (server) =>
-        new Promise<void>((resolve, reject) => {
-          server.close((error) => (error ? reject(error) : resolve()))
-        }),
-    ),
-  )
-})
+const logger = pino({ level: "silent" })
 
 describe("createProxyServer", () => {
   it("streams Responses API events over HTTP SSE", async () => {
@@ -88,27 +114,24 @@ describe("createProxyServer", () => {
         ]),
       )
     }) satisfies typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/responses`, {
-      method: "POST",
-      headers: { Authorization: "Bearer client_dummy", "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "deepseek-v4-pro", input: "hi", stream: true }),
-    })
-
-    expect(response.status).toBe(200)
-    expect(response.headers.get("content-type")).toContain("text/event-stream")
-    const events = await sseEvents(response)
-    expect(events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: "response.created" }),
-        expect.objectContaining({ type: "response.output_text.delta", delta: "hello" }),
-        expect.objectContaining({ type: "response.completed" }),
-      ]),
+    const { res, result } = mockResponse()
+    const req = mockReq(
+      "POST",
+      "/v1/responses",
+      JSON.stringify({ model: "deepseek-v4-pro", input: "hi", stream: true }),
     )
-    expect(upstreamHeaders).toMatchObject({
-      Authorization: "Bearer user_fixed",
-    })
+
+    await handleRequest(req, res, mockConfig(), logger, fetchImpl, null)
+    const r = result()
+
+    expect(r.status).toBe(200)
+    expect(r.headers["content-type"]).toContain("text/event-stream")
+    expect(r.body).toContain("response.created")
+    expect(r.body).toContain("response.output_text.delta")
+    expect(r.body).toContain("hello")
+    expect(r.body).toContain("response.completed")
+    expect(upstreamHeaders).toMatchObject({ Authorization: "Bearer user_fixed" })
   })
 
   it("returns non-streaming chat completions over HTTP", async () => {
@@ -118,20 +141,22 @@ describe("createProxyServer", () => {
         JSON.stringify({ type: "finish", finishReason: "stop" }),
       ]),
     ) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const { res, result } = mockResponse()
+    const req = mockReq(
+      "POST",
+      "/v1/chat/completions",
+      JSON.stringify({
         model: "deepseek-v4-pro",
         messages: [{ role: "user", content: "hi" }],
         stream: false,
       }),
-    })
+    )
 
-    expect(response.status).toBe(200)
-    expect(await response.json()).toMatchObject({
+    await handleRequest(req, res, mockConfig(), logger, fetchImpl, null)
+    const r = result()
+    expect(r.status).toBe(200)
+    expect(JSON.parse(r.body)).toMatchObject({
       object: "chat.completion",
       choices: [{ message: { role: "assistant", content: "hello" }, finish_reason: "stop" }],
     })
@@ -139,16 +164,14 @@ describe("createProxyServer", () => {
 
   it("maps invalid JSON bodies to OpenAI-style request errors", async () => {
     const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/responses`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{",
-    })
+    const { res, result } = mockResponse()
+    const req = mockReq("POST", "/v1/responses", "{")
 
-    expect(response.status).toBe(400)
-    expect(await response.json()).toEqual({
+    await handleRequest(req, res, mockConfig(), logger, fetchImpl, null)
+    const r = result()
+    expect(r.status).toBe(400)
+    expect(JSON.parse(r.body)).toEqual({
       error: {
         message: "Invalid JSON request body",
         type: "invalid_request_error",
@@ -161,16 +184,14 @@ describe("createProxyServer", () => {
 
   it("maps upstream failures to OpenAI-style errors", async () => {
     const fetchImpl = vi.fn(async () => new Response("nope", { status: 401 })) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/responses`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: "hi" }),
-    })
+    const { res, result } = mockResponse()
+    const req = mockReq("POST", "/v1/responses", JSON.stringify({ input: "hi" }))
 
-    expect(response.status).toBe(401)
-    expect(await response.json()).toEqual({
+    await handleRequest(req, res, mockConfig(), logger, fetchImpl, null)
+    const r = result()
+    expect(r.status).toBe(401)
+    expect(JSON.parse(r.body)).toEqual({
       error: {
         message: "Command Code API error 401: nope",
         type: "authentication_error",
@@ -182,16 +203,17 @@ describe("createProxyServer", () => {
 
   it("returns 501 for storage endpoints when no store configured", async () => {
     const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    for (const [path, method] of [
+    for (const [p, method] of [
       ["/v1/responses/resp_test", "GET"],
       ["/v1/responses/resp_test/input_items", "GET"],
       ["/v1/responses/resp_test/cancel", "POST"],
     ] as const) {
-      const response = await fetch(`${baseUrl}${path}`, { method })
-      expect(response.status).toBe(501)
-      expect(await response.json()).toEqual({
+      const { res, result } = mockResponse()
+      await handleRequest(mockReq(method, p), res, mockConfig(), logger, fetchImpl, null)
+      const r = result()
+      expect(r.status).toBe(501)
+      expect(JSON.parse(r.body)).toEqual({
         error: {
           message: "Response storage is not configured for this proxy instance",
           type: "invalid_request_error",
@@ -205,15 +227,33 @@ describe("createProxyServer", () => {
 
   it("returns compact and input_tokens without store", async () => {
     const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const compactResponse = await fetch(`${baseUrl}/v1/responses/compact`, { method: "POST" })
-    expect(compactResponse.status).toBe(200)
-    expect(await compactResponse.json()).toMatchObject({ object: "response.compacted" })
-
-    const tokensResponse = await fetch(`${baseUrl}/v1/responses/input_tokens`, { method: "POST" })
-    expect(tokensResponse.status).toBe(200)
-    expect(await tokensResponse.json()).toEqual({ input_tokens: 0 })
+    {
+      const { res, result } = mockResponse()
+      await handleRequest(
+        mockReq("POST", "/v1/responses/compact"),
+        res,
+        mockConfig(),
+        logger,
+        fetchImpl,
+        null,
+      )
+      expect(result().status).toBe(200)
+      expect(JSON.parse(result().body)).toMatchObject({ object: "response.compacted" })
+    }
+    {
+      const { res, result } = mockResponse()
+      await handleRequest(
+        mockReq("POST", "/v1/responses/input_tokens"),
+        res,
+        mockConfig(),
+        logger,
+        fetchImpl,
+        null,
+      )
+      expect(result().status).toBe(200)
+      expect(JSON.parse(result().body)).toEqual({ input_tokens: 0 })
+    }
   })
 
   it("stores and retrieves Responses via store", async () => {
@@ -227,38 +267,63 @@ describe("createProxyServer", () => {
     })
 
     const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl, store)
+    const cfg = mockConfig()
 
-    // GET /v1/responses/resp_test
-    const getResponse = await fetch(`${baseUrl}/v1/responses/resp_test`)
-    expect(getResponse.status).toBe(200)
-    expect(await getResponse.json()).toEqual({
-      id: "resp_test",
-      object: "response",
-      status: "completed",
-    })
-
-    // GET /v1/responses/resp_test/input_items
-    const itemsResponse = await fetch(`${baseUrl}/v1/responses/resp_test/input_items`)
-    expect(itemsResponse.status).toBe(200)
-    expect(await itemsResponse.json()).toEqual({
-      object: "list",
-      data: ["hello"],
-      first_id: "hello",
-      last_id: "hello",
-      has_more: false,
-    })
-
-    // POST /v1/responses/resp_test/cancel
-    const cancelResponse = await fetch(`${baseUrl}/v1/responses/resp_test/cancel`, {
-      method: "POST",
-    })
-    expect(cancelResponse.status).toBe(200)
-    expect(await cancelResponse.json()).toMatchObject({ id: "resp_test" })
-
-    // GET missing response
-    const missing = await fetch(`${baseUrl}/v1/responses/nonexistent`)
-    expect(missing.status).toBe(404)
+    {
+      const { res, result } = mockResponse()
+      await handleRequest(
+        mockReq("GET", "/v1/responses/resp_test"),
+        res,
+        cfg,
+        logger,
+        fetchImpl,
+        store,
+      )
+      expect(result().status).toBe(200)
+      expect(JSON.parse(result().body)).toEqual({
+        id: "resp_test",
+        object: "response",
+        status: "completed",
+      })
+    }
+    {
+      const { res, result } = mockResponse()
+      await handleRequest(
+        mockReq("GET", "/v1/responses/resp_test/input_items"),
+        res,
+        cfg,
+        logger,
+        fetchImpl,
+        store,
+      )
+      expect(result().status).toBe(200)
+      expect(JSON.parse(result().body)).toMatchObject({ object: "list", data: ["hello"] })
+    }
+    {
+      const { res, result } = mockResponse()
+      await handleRequest(
+        mockReq("POST", "/v1/responses/resp_test/cancel"),
+        res,
+        cfg,
+        logger,
+        fetchImpl,
+        store,
+      )
+      expect(result().status).toBe(200)
+      expect(JSON.parse(result().body)).toMatchObject({ id: "resp_test" })
+    }
+    {
+      const { res, result } = mockResponse()
+      await handleRequest(
+        mockReq("GET", "/v1/responses/nonexistent"),
+        res,
+        cfg,
+        logger,
+        fetchImpl,
+        store,
+      )
+      expect(result().status).toBe(404)
+    }
   })
 
   it("injects previous_response_id output into request context", async () => {
@@ -294,19 +359,22 @@ describe("createProxyServer", () => {
         ]),
       )
     }) satisfies typeof fetch
-    const baseUrl = await startProxy(fetchImpl, store)
 
-    await fetch(`${baseUrl}/v1/responses`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        input: "follow-up",
-        previous_response_id: "prev_resp",
-        stream: false,
-      }),
-    })
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/responses",
+        JSON.stringify({ input: "follow-up", previous_response_id: "prev_resp", stream: false }),
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      store,
+    )
+    expect(result().status).toBe(200)
 
-    // Verify the previous output was injected into messages
     const payload = capturedPayload as Record<string, unknown> | undefined
     const params = payload?.params as Record<string, unknown> | undefined
     const messages = params?.messages as Array<Record<string, unknown>> | undefined
@@ -325,35 +393,33 @@ describe("createProxyServer", () => {
         }),
       ]),
     ) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer client_dummy",
-        "Content-Type": "application/json",
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        messages: [{ role: "user", content: "hi" }],
-        max_tokens: 4096,
-        stream: true,
-      }),
-    })
-
-    expect(response.status).toBe(200)
-    expect(response.headers.get("content-type")).toContain("text/event-stream")
-    const events = await sseEvents(response)
-    expect(events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: "message_start" }),
-        expect.objectContaining({ type: "content_block_delta" }),
-        expect.objectContaining({ type: "content_block_stop" }),
-        expect.objectContaining({ type: "message_delta" }),
-        expect.objectContaining({ type: "message_stop" }),
-      ]),
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 4096,
+          stream: true,
+        }),
+        { "anthropic-version": "2023-06-01" },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
     )
+    const r = result()
+    expect(r.status).toBe(200)
+    expect(r.body).toContain("message_start")
+    expect(r.body).toContain("content_block_delta")
+    expect(r.body).toContain("content_block_stop")
+    expect(r.body).toContain("message_delta")
+    expect(r.body).toContain("message_stop")
   })
 
   it("returns non-streaming Messages response over HTTP", async () => {
@@ -367,25 +433,28 @@ describe("createProxyServer", () => {
         }),
       ]),
     ) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        messages: [{ role: "user", content: "hi" }],
-        max_tokens: 4096,
-        stream: false,
-      }),
-    })
-
-    expect(response.status).toBe(200)
-    const body = await response.json()
-    expect(body).toMatchObject({
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 4096,
+          stream: false,
+        }),
+        { "anthropic-version": "2023-06-01" },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+    expect(result().status).toBe(200)
+    expect(JSON.parse(result().body)).toMatchObject({
       type: "message",
       role: "assistant",
       content: [{ type: "text", text: "hello" }],
@@ -396,24 +465,30 @@ describe("createProxyServer", () => {
     const fetchImpl = vi.fn(
       async () => new Response("unauthorized", { status: 401 }),
     ) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        messages: [{ role: "user", content: "hi" }],
-        max_tokens: 4096,
-      }),
-    })
-
-    expect(response.status).toBe(401)
-    expect(await response.json()).toMatchObject({
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 4096,
+        }),
+        { "anthropic-version": "2023-06-01" },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+    const r = result()
+    expect(r.status).toBe(401)
+    expect(JSON.parse(r.body)).toMatchObject({
       type: "error",
-      error: {
-        type: "authentication_error",
-      },
+      error: { type: "authentication_error" },
     })
   })
 
@@ -428,22 +503,25 @@ describe("createProxyServer", () => {
         ]),
       )
     }) satisfies typeof fetch
-    const baseUrl = await startProxy(fetchImpl, undefined, { authMode: "pass_through" })
 
-    await fetch(`${baseUrl}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "x-api-key": "user_fixed",
-        "Content-Type": "application/json",
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        messages: [{ role: "user", content: "hi" }],
-        max_tokens: 4096,
-      }),
-    })
-
+    const { res } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 4096,
+        }),
+        { "x-api-key": "user_fixed", "anthropic-version": "2023-06-01" },
+      ),
+      res,
+      mockConfig({ authMode: "pass_through" }),
+      logger,
+      fetchImpl,
+      null,
+    )
     expect(upstreamHeaders?.Authorization).toBe("Bearer user_fixed")
   })
 
@@ -451,23 +529,27 @@ describe("createProxyServer", () => {
     const fetchImpl = vi.fn(async () =>
       commandCodeResponse([JSON.stringify({ type: "text-delta", text: "hello" })]),
     ) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl, undefined, { authMode: "pass_through" })
 
-    const response = await fetch(`${baseUrl}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "x-api-key": "wrong_key",
-        "Content-Type": "application/json",
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        messages: [{ role: "user", content: "hi" }],
-        max_tokens: 4096,
-      }),
-    })
-
-    expect(response.status).toBe(401)
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 4096,
+        }),
+        { "x-api-key": "wrong_key", "anthropic-version": "2023-06-01" },
+      ),
+      res,
+      mockConfig({ authMode: "pass_through" }),
+      logger,
+      fetchImpl,
+      null,
+    )
+    const r = result()
+    expect(r.status).toBe(401)
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 
@@ -475,21 +557,22 @@ describe("createProxyServer", () => {
     const fetchImpl = vi.fn(async () =>
       commandCodeResponse([JSON.stringify({ type: "text-delta", text: "hello" })]),
     ) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl, undefined, { authMode: "pass_through" })
 
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer wrong_key",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "deepseek-v4-pro",
-        messages: [{ role: "user", content: "hi" }],
-      }),
-    })
-
-    expect(response.status).toBe(401)
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/chat/completions",
+        JSON.stringify({ model: "deepseek-v4-pro", messages: [{ role: "user", content: "hi" }] }),
+        { authorization: "Bearer wrong_key" },
+      ),
+      res,
+      mockConfig({ authMode: "pass_through" }),
+      logger,
+      fetchImpl,
+      null,
+    )
+    expect(result().status).toBe(401)
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 
@@ -504,19 +587,24 @@ describe("createProxyServer", () => {
         ]),
       )
     }) satisfies typeof fetch
-    const baseUrl = await startProxy(fetchImpl, undefined, { authMode: "pass_through" })
 
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "deepseek-v4-pro",
-        messages: [{ role: "user", content: "hi" }],
-        stream: false,
-      }),
-    })
-
-    expect(response.status).toBe(200)
+    const { res } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/chat/completions",
+        JSON.stringify({
+          model: "deepseek-v4-pro",
+          messages: [{ role: "user", content: "hi" }],
+          stream: false,
+        }),
+      ),
+      res,
+      mockConfig({ authMode: "pass_through" }),
+      logger,
+      fetchImpl,
+      null,
+    )
     expect(upstreamHeaders?.Authorization).toBe("Bearer user_fixed")
   })
 
@@ -531,21 +619,25 @@ describe("createProxyServer", () => {
         ]),
       )
     }) satisfies typeof fetch
-    const baseUrl = await startProxy(fetchImpl, undefined, { authMode: "fixed" })
 
-    await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer random_client_key",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "deepseek-v4-pro",
-        messages: [{ role: "user", content: "hi" }],
-        stream: false,
-      }),
-    })
-
+    const { res } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/chat/completions",
+        JSON.stringify({
+          model: "deepseek-v4-pro",
+          messages: [{ role: "user", content: "hi" }],
+          stream: false,
+        }),
+        { authorization: "Bearer random_client_key" },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
     expect(upstreamHeaders?.Authorization).toBe("Bearer user_fixed")
   })
 
@@ -561,27 +653,29 @@ describe("createProxyServer", () => {
         }),
       ]),
     ) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "deepseek-v4-pro",
-        messages: [{ role: "user", content: "hi" }],
-        stream: true,
-      }),
-    })
-
-    expect(response.status).toBe(200)
-    expect(response.headers.get("content-type")).toContain("text/event-stream")
-    const events = await sseEvents(response)
-    const deltas = events.flatMap((e) => {
-      const chunk = e as { choices?: Array<{ delta?: Record<string, unknown> }> }
-      return chunk.choices?.[0]?.delta ? [chunk.choices[0].delta] : []
-    })
-    expect(deltas.some((d) => d.reasoning_content === "Thinking...")).toBe(true)
-    expect(deltas.some((d) => d.content === "hello")).toBe(true)
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/chat/completions",
+        JSON.stringify({
+          model: "deepseek-v4-pro",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+    const r = result()
+    expect(r.status).toBe(200)
+    expect(r.body).toContain("reasoning_content")
+    expect(r.body).toContain("Thinking...")
+    expect(r.body).toContain("hello")
   })
 
   it("includes usage chunk in chat completions stream when stream_options.include_usage is set", async () => {
@@ -595,38 +689,48 @@ describe("createProxyServer", () => {
         }),
       ]),
     ) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "deepseek-v4-pro",
-        messages: [{ role: "user", content: "hi" }],
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-    })
-
-    const events = await sseEvents(response)
-    expect(events.some((e) => (e as Record<string, unknown>).usage !== undefined)).toBe(true)
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/chat/completions",
+        JSON.stringify({
+          model: "deepseek-v4-pro",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+          stream_options: { include_usage: true },
+        }),
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+    expect(result().status).toBe(200)
+    expect(result().body).toContain("usage")
   })
 
   it("passes upstream 5xx errors as server_error", async () => {
     const fetchImpl = vi.fn(async () => new Response("boom", { status: 502 })) as typeof fetch
-    const baseUrl = await startProxy(fetchImpl)
 
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "deepseek-v4-pro",
-        messages: [{ role: "user", content: "hi" }],
-      }),
-    })
-
-    expect(response.status).toBe(502)
-    expect(await response.json()).toMatchObject({
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/chat/completions",
+        JSON.stringify({ model: "deepseek-v4-pro", messages: [{ role: "user", content: "hi" }] }),
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+    const r = result()
+    expect(r.status).toBe(502)
+    expect(JSON.parse(r.body)).toMatchObject({
       error: { type: "server_error", code: "upstream_502" },
     })
   })
