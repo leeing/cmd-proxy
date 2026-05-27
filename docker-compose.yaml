@@ -6,7 +6,7 @@ services:
     environment:
       - CMD_API_KEY=${CMD_API_KEY}
       - CMD_PROXY_PORT=${CMD_PROXY_PORT:-8888}
-      - CMD_PROXY_AUTH_MODE=${CMD_PROXY_AUTH_MODE:-fixed}
+      - CMD_PROXY_AUTH_MODE=${CMD_PROXY_AUTH_MODE:-pass_through}
       - CMD_API_BASE=${CMD_API_BASE:-https://api.commandcode.ai}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - CMD_PROXY_UPSTREAM_TIMEOUT_MS=${CMD_PROXY_UPSTREAM_TIMEOUT_MS:-300000}
