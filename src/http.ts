@@ -114,12 +114,16 @@ async function handleRequestInner(
   if (config.authMode === "pass_through" && req.method === "POST") {
     const clientKey = apiKeyFromRequest(req)
     if (clientKey !== undefined && clientKey !== config.apiKey) {
-      sendOpenAiError(res, 401, {
-        message: "Invalid API key",
-        type: "authentication_error",
-        code: "invalid_api_key",
-      })
-      return
+      if (isJwt(clientKey)) {
+        logger.debug("Accepting JWT bearer token, using config.apiKey upstream")
+      } else {
+        sendOpenAiError(res, 401, {
+          message: "Invalid API key",
+          type: "authentication_error",
+          code: "invalid_api_key",
+        })
+        return
+      }
     }
   }
 
@@ -770,9 +774,15 @@ function apiKeyFromRequest(req: IncomingMessage): string | undefined {
   return undefined
 }
 
+function isJwt(token: string): boolean {
+  return token.length > 100 && token.startsWith("eyJ")
+}
+
 function upstreamApiKey(req: IncomingMessage, config: AppConfig): string {
   if (config.authMode === "fixed" || config.authMode === "none") return config.apiKey
-  return apiKeyFromRequest(req) ?? config.apiKey
+  const clientKey = apiKeyFromRequest(req)
+  if (clientKey === undefined || isJwt(clientKey)) return config.apiKey
+  return clientKey
 }
 
 function openAiErrorTypeForStatus(status: number): string {
