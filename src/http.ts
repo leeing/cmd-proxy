@@ -45,33 +45,12 @@ export function createProxyServer(options: ProxyServerOptions): Server {
   const fetchImpl = options.fetchImpl ?? fetch
   const store = options.store ?? null
 
-  return createServer(async (req, res) => {
-    try {
-      await handleRequest(req, res, options.config, logger, fetchImpl, store)
-    } catch (error) {
-      logger.error({ error }, "Unhandled request error")
-      if (!res.headersSent) {
-        if (error instanceof SyntaxError) {
-          sendOpenAiError(res, 400, {
-            message: "Invalid JSON request body",
-            type: "invalid_request_error",
-            code: "invalid_json",
-          })
-        } else {
-          sendOpenAiError(res, 500, {
-            message: errorMessage(error),
-            type: "internal_error",
-            code: "internal_error",
-          })
-        }
-      } else {
-        res.end()
-      }
-    }
+  return createServer((req, res) => {
+    handleRequest(req, res, options.config, logger, fetchImpl, store)
   })
 }
 
-async function handleRequest(
+export async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   config: AppConfig,
@@ -80,11 +59,50 @@ async function handleRequest(
   store: ResponseStore | null,
 ): Promise<void> {
   const url = req.url?.split("?")[0] ?? "/"
+  try {
+    await handleRequestInner(req, res, url, config, logger, fetchImpl, store)
+  } catch (error) {
+    logger.error({ error }, "Unhandled request error")
+    if (!res.headersSent) {
+      if (error instanceof SyntaxError) {
+        sendOpenAiError(res, 400, {
+          message: "Invalid JSON request body",
+          type: "invalid_request_error",
+          code: "invalid_json",
+        })
+      } else {
+        sendOpenAiError(res, 500, {
+          message: errorMessage(error),
+          type: "internal_error",
+          code: "internal_error",
+        })
+      }
+    } else {
+      res.end()
+    }
+  }
+}
+
+async function handleRequestInner(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: string,
+  config: AppConfig,
+  logger: Logger,
+  fetchImpl: typeof fetch,
+  store: ResponseStore | null,
+): Promise<void> {
   logger.debug({ method: req.method, url }, "Incoming request")
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, corsHeaders())
     res.end()
+    return
+  }
+
+  if (req.method === "GET" && (url === "/health" || url === "/v1/health" || url === "/healthz")) {
+    res.writeHead(200, { "Content-Type": "text/plain", ...corsHeaders() })
+    res.end("ok")
     return
   }
 
@@ -148,7 +166,10 @@ async function handleChatCompletions(
   }
 
   const chatRequest = request as ChatCompletionRequest
-  const commandCodePayload = convertChatCompletionRequestToCommandCode(chatRequest)
+  const commandCodePayload = convertChatCompletionRequestToCommandCode(chatRequest, {
+    memory: config.memory,
+    taste: config.taste,
+  })
   const upstream = await fetchCommandCode(req, config, fetchImpl, commandCodePayload)
   if (!upstream.ok) {
     await sendUpstreamError(upstream, res, logger)
@@ -207,7 +228,10 @@ async function handleResponses(
     ? { ...responsesRequest, input: inputWithContext }
     : responsesRequest
 
-  const commandCodePayload = convertResponsesRequestToCommandCode(requestWithContext)
+  const commandCodePayload = convertResponsesRequestToCommandCode(requestWithContext, {
+    memory: config.memory,
+    taste: config.taste,
+  })
   logger.debug(
     {
       commandCodeModel: commandCodePayload.params.model,
@@ -546,7 +570,10 @@ async function handleMessages(
   const anthropicVersion = req.headers["anthropic-version"] ?? "2023-06-01"
 
   const messagesRequest = request as AnthropicMessageRequest
-  const commandCodePayload = convertAnthropicRequestToCommandCode(messagesRequest)
+  const commandCodePayload = convertAnthropicRequestToCommandCode(messagesRequest, {
+    memory: config.memory,
+    taste: config.taste,
+  })
   const upstream = await fetchCommandCode(req, config, fetchImpl, commandCodePayload)
 
   if (!upstream.ok) {
@@ -662,7 +689,7 @@ function writeAnthropicSseEvent(res: ServerResponse, event: AnthropicSseEvent): 
 }
 
 function writeSsePing(res: ServerResponse): void {
-  res.write("event: ping\ndata: {}\n\n")
+  res.write(": heartbeat\n\n")
 }
 
 function startSsePing(res: ServerResponse): () => void {

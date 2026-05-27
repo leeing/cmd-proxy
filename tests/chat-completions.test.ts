@@ -55,14 +55,14 @@ describe("convertChatCompletionRequestToCommandCode", () => {
     expect(result.params.temperature).toBe(0.1)
   })
 
-  it("does not forward string tool_choice values to Command Code", () => {
+  it("forwards string tool_choice values to Command Code", () => {
     const result = convertChatCompletionRequestToCommandCode({
       model: "deepseek-v4-pro",
       messages: [{ role: "user", content: "hi" }],
       tool_choice: "auto",
     })
 
-    expect(result.params.tool_choice).toBeUndefined()
+    expect(result.params.tool_choice).toBe("auto")
   })
 
   it("normalizes non-object function parameters to object schemas for Command Code", () => {

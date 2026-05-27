@@ -12,6 +12,6 @@ EXPOSE 8888
 ENV CMD_PROXY_PORT=8888
 
 HEALTHCHECK --interval=30s --timeout=3s \
-  CMD node -e "fetch('http://localhost:8888/v1/models').then(r=>{if(!r.ok)throw new Error(r.status);process.exit(0)}).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://localhost:8888/health').then(r=>{if(!r.ok)throw new Error(r.status);process.exit(0)}).catch(()=>process.exit(1))"
 
 CMD ["pnpm", "dev"]

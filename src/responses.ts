@@ -15,6 +15,7 @@ import type {
 } from "./types.ts"
 import {
   getEnvironmentInfo,
+  getGitContext,
   idWithPrefix,
   isRecord,
   numberValue,
@@ -30,7 +31,7 @@ const MAX_OUTPUT_TOKENS = 200_000
 
 export function convertResponsesRequestToCommandCode(
   request: ResponsesRequest,
-  options: { cwd?: string; now?: Date } = {},
+  options: { cwd?: string; now?: Date; memory?: string; taste?: string } = {},
 ): CommandCodePayload {
   const messages: CommandCodeMessage[] = []
   const toolNamesByCallId = new Map<string, string>()
@@ -57,7 +58,8 @@ export function convertResponsesRequestToCommandCode(
   if (typeof request.temperature === "number") params.temperature = request.temperature
   if (typeof request.top_p === "number") params.top_p = request.top_p
   if (typeof request.stop === "string" || Array.isArray(request.stop)) params.stop = request.stop
-  if (isRecord(request.tool_choice)) params.tool_choice = request.tool_choice
+  if (typeof request.tool_choice === "string" || isRecord(request.tool_choice))
+    params.tool_choice = request.tool_choice
   if (typeof request.parallel_tool_calls === "boolean") {
     params.parallel_tool_calls = request.parallel_tool_calls
   }
@@ -68,20 +70,21 @@ export function convertResponsesRequestToCommandCode(
   if (request.response_format) params.response_format = request.response_format
 
   const now = options.now ?? new Date()
+  const git = getGitContext()
   return {
     config: {
       workingDir: options.cwd ?? process.cwd(),
       date: now.toISOString().split("T")[0] ?? now.toISOString(),
       environment: getEnvironmentInfo(),
       structure: [],
-      isGitRepo: false,
-      currentBranch: "",
-      mainBranch: "",
-      gitStatus: "",
-      recentCommits: [],
+      isGitRepo: git.isGitRepo,
+      currentBranch: git.currentBranch,
+      mainBranch: git.mainBranch,
+      gitStatus: git.gitStatus,
+      recentCommits: git.recentCommits,
     },
-    memory: "",
-    taste: "",
+    memory: options.memory ?? "",
+    taste: options.taste ?? "",
     skills: null,
     permissionMode: "standard",
     params,

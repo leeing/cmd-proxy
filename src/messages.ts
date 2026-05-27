@@ -11,6 +11,7 @@ import type {
 } from "./types.ts"
 import {
   getEnvironmentInfo,
+  getGitContext,
   idWithPrefix,
   isRecord,
   numberValue,
@@ -156,7 +157,7 @@ const SYSTEM_PROMPT = ""
 
 export function convertAnthropicRequestToCommandCode(
   request: AnthropicMessageRequest,
-  options: { cwd?: string; now?: Date } = {},
+  options: { cwd?: string; now?: Date; memory?: string; taste?: string } = {},
 ): CommandCodePayload {
   const systemParts: string[] = []
 
@@ -201,20 +202,21 @@ export function convertAnthropicRequestToCommandCode(
   }
 
   const now = options.now ?? new Date()
+  const git = getGitContext()
   return {
     config: {
       workingDir: options.cwd ?? process.cwd(),
       date: now.toISOString().split("T")[0] ?? now.toISOString(),
       environment: getEnvironmentInfo(),
       structure: [],
-      isGitRepo: false,
-      currentBranch: "",
-      mainBranch: "",
-      gitStatus: "",
-      recentCommits: [],
+      isGitRepo: git.isGitRepo,
+      currentBranch: git.currentBranch,
+      mainBranch: git.mainBranch,
+      gitStatus: git.gitStatus,
+      recentCommits: git.recentCommits,
     },
-    memory: "",
-    taste: "",
+    memory: options.memory ?? "",
+    taste: options.taste ?? "",
     skills: null,
     permissionMode: "standard",
     params,

@@ -125,3 +125,65 @@ function firstUnionVariant(schema: JsonObject): unknown {
   }
   return {}
 }
+
+import { execSync } from "node:child_process"
+
+export interface GitContext {
+  isGitRepo: boolean
+  currentBranch: string
+  mainBranch: string
+  gitStatus: string
+  recentCommits: Array<{
+    hash: string
+    message: string
+    date: string
+  }>
+}
+
+let _gitContext: GitContext | undefined
+
+export function getGitContext(): GitContext {
+  if (_gitContext !== undefined) return _gitContext
+
+  try {
+    execSync("git rev-parse --git-dir", { stdio: "ignore", timeout: 2000 })
+  } catch {
+    _gitContext = {
+      isGitRepo: false,
+      currentBranch: "",
+      mainBranch: "",
+      gitStatus: "",
+      recentCommits: [],
+    }
+    return _gitContext
+  }
+
+  const exec = (cmd: string): string => {
+    try {
+      return execSync(cmd, { encoding: "utf-8", timeout: 3000 }).trim()
+    } catch {
+      return ""
+    }
+  }
+
+  const currentBranch = exec("git branch --show-current")
+  const mainBranch =
+    exec("git remote show origin 2>/dev/null | grep 'HEAD branch' | cut -d: -f2 | xargs") || "main"
+  const gitStatus = exec("git status --short")
+  const commitLog = exec('git log --oneline -5 --format="%h|||%s|||%ci"')
+  const recentCommits = commitLog
+    ? commitLog.split("\n").map((line) => {
+        const parts = line.split("|||")
+        return { hash: parts[0] ?? "", message: parts[1] ?? "", date: parts[2] ?? "" }
+      })
+    : []
+
+  _gitContext = {
+    isGitRepo: true,
+    currentBranch,
+    mainBranch,
+    gitStatus: gitStatus.slice(0, 2000),
+    recentCommits: recentCommits.slice(0, 5),
+  }
+  return _gitContext
+}
