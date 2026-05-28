@@ -61,6 +61,7 @@ export interface CommandCodeParams {
   frequency_penalty?: number
   presence_penalty?: number
   thinking?: { type: "enabled"; budget_tokens: number }
+  context_management?: unknown
   response_format?: unknown
   seed?: number
   top_k?: number

@@ -39,6 +39,14 @@ export interface AnthropicOutputConfig {
   }
 }
 
+export interface AnthropicContextManagement {
+  edits?: Array<{
+    type: string
+    trigger?: { type: string; value: number }
+    keep?: { type: string; value: number }
+  }>
+}
+
 class AnthropicRequestError extends Error {
   readonly status: number
   readonly type: string
@@ -68,7 +76,7 @@ export interface AnthropicMessageRequest {
   service_tier?: string
   container?: unknown
   mcp_servers?: unknown
-  context_management?: unknown
+  context_management?: AnthropicContextManagement
   output_config?: AnthropicOutputConfig
 }
 
@@ -277,6 +285,11 @@ export function convertAnthropicRequestToCommandCode(
     }
   }
 
+  // Map Anthropic context management
+  if (request.context_management) {
+    params.context_management = request.context_management
+  }
+
   const now = options.now ?? new Date()
   const git = getGitContext()
   return {
@@ -457,9 +470,6 @@ function warnAboutUnsupportedAnthropicRequest(
     if (request[field] !== undefined) {
       warn(`Ignored unsupported Anthropic request field: ${field}`, onWarning)
     }
-  }
-  if (request.context_management !== undefined) {
-    warn("Ignored unsupported Anthropic request field: context_management", onWarning)
   }
 }
 
