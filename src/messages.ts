@@ -92,6 +92,7 @@ export type AnthropicContentBlock =
       is_error?: boolean
       cache_control?: AnthropicCacheControl
     }
+  | { type: "thinking"; thinking: string; signature: string }
   | { type: "image"; source: AnthropicImageSource }
   | { type: "document"; title?: string; source: AnthropicDocumentSource }
 
@@ -395,6 +396,8 @@ function appendAnthropicMessage(
           toolName: block.name,
           input: block.input,
         })
+      } else if (block.type === "thinking") {
+        parts.push({ type: "reasoning", text: block.thinking, signature: block.signature })
       } else {
         warnUnsupportedContentBlock(block, onWarning)
       }
@@ -494,6 +497,7 @@ function estimateContentBlockTokens(block: AnthropicContentBlock): number {
   if (block.type === "tool_result") return estimateToolResultTokens(block)
   if (block.type === "image") return 256
   if (block.type === "document") return estimateDocumentTokens(block)
+  if (block.type === "thinking") return estimateTextTokens(block.thinking)
   return 1
 }
 

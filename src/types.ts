@@ -35,6 +35,11 @@ export type CommandCodeContent =
       }
       cache_control?: { type: "ephemeral" }
     }
+  | {
+      type: "reasoning"
+      text: string
+      signature?: string
+    }
 
 export interface CommandCodeMessage {
   role: "user" | "assistant" | "tool"
