@@ -253,8 +253,8 @@ pnpm test
 - OpenAI Responses 内建工具（如 `web_search_preview`、`file_search`、`code_interpreter`、MCP 等）当前会降级为 warning 并从上游请求中移除，避免阻断 Codex 主流程；待上游提供对应能力后再映射。
 - OpenAI Chat Completions 非 `function` 工具当前会降级为 warning 并从上游请求中移除。
 - Anthropic server tools / MCP / web search 工具当前会降级为 warning 并从上游请求中移除，避免阻断 Claude Code 主流程；待上游提供对应能力后再映射。
-- Anthropic `context_management` 会先检查对应 `anthropic-beta`；beta 已启用时当前会接受并安全忽略，不执行真实上下文裁剪。
-- Anthropic `mcp_servers`、`container`、`output_config` 依赖 Anthropic 原生后端语义，当前会降级为 warning 并安全忽略。
+- Anthropic `context_management` 会先检查对应 `anthropic-beta`；beta 已启用时映射至上游 params，是否实际裁剪由上游决定。
+- Anthropic `mcp_servers`、`container` 依赖 Anthropic 原生后端语义，当前会降级为 warning 并安全忽略。
 - 不支持的 Anthropic content block 或非文本 document 会降级为 warning 并跳过，不再阻断请求。
 - Anthropic `count_tokens` 当前是本地估算，不代表 Anthropic 官方 tokenizer 或上游模型 tokenizer 的精确结果；主要用于 Claude SDK/Claude Code 的协议探测和预算粗估。
 - Anthropic document 目前只支持 `source.type = "text"` 并折叠为文本上下文；PDF、base64 document、URL document、citations 不做伪造。
