@@ -200,6 +200,7 @@ async function handleChatCompletions(
 
   const chatRequest = request as ChatCompletionRequest
   const warnings: string[] = []
+  await resolveRemoteImages(chatRequest)
   const commandCodePayload = convertChatCompletionRequestToCommandCode(chatRequest, {
     memory: config.memory,
     taste: config.taste,
@@ -264,6 +265,8 @@ async function handleResponses(
   const requestWithContext: ResponsesRequest = inputWithContext
     ? { ...responsesRequest, input: inputWithContext }
     : responsesRequest
+
+  await resolveRemoteImages(requestWithContext)
 
   const warnings: string[] = []
   const commandCodePayload = convertResponsesRequestToCommandCode(requestWithContext, {
@@ -1077,4 +1080,58 @@ function injectPreviousResponseContext(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+async function resolveRemoteImages(request: unknown): Promise<void> {
+  if (!isRecord(request)) return
+  const imageUrls: Array<{ parent: Record<string, unknown>; key: string; url: string }> = []
+  walkRemoteImageUrls(request, imageUrls)
+  if (imageUrls.length === 0) return
+
+  const entries = await Promise.all(
+    imageUrls.map(async (entry) => {
+      try {
+        const dataUri = await fetchImageAsDataUri(entry.url)
+        return { entry, dataUri }
+      } catch {
+        return { entry, dataUri: null }
+      }
+    }),
+  )
+  for (const { entry, dataUri } of entries) {
+    if (dataUri) entry.parent[entry.key] = dataUri
+  }
+}
+
+function walkRemoteImageUrls(
+  value: unknown,
+  results: Array<{ parent: Record<string, unknown>; key: string; url: string }>,
+): void {
+  if (isRecord(value)) {
+    if (typeof value.image_url === "string" && /^https?:\/\//i.test(value.image_url)) {
+      results.push({ parent: value, key: "image_url", url: value.image_url })
+      return
+    }
+    if (isRecord(value.image_url)) {
+      const url = stringValue(value.image_url.url)
+      if (url && /^https?:\/\//i.test(url)) {
+        results.push({ parent: value.image_url, key: "url", url })
+      }
+    }
+    for (const key of Object.keys(value)) {
+      walkRemoteImageUrls(value[key], results)
+    }
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) walkRemoteImageUrls(item, results)
+  }
+}
+
+async function fetchImageAsDataUri(url: string): Promise<string> {
+  const resp = await fetch(url, { signal: AbortSignal.timeout(10000) })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const buffer = Buffer.from(await resp.arrayBuffer())
+  const contentType = resp.headers.get("content-type") ?? "application/octet-stream"
+  return `data:${contentType};base64,${buffer.toString("base64")}`
 }
