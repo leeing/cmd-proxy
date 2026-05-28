@@ -317,6 +317,9 @@ async function handleResponses(
     const commandCodeEvents = await readCommandCodeEvents(upstream)
     const responseEvents = responsesEventsFromCommandCodeEvents(commandCodeEvents, {
       responseId,
+      ...(responsesRequest.previous_response_id !== undefined
+        ? { previousResponseId: responsesRequest.previous_response_id }
+        : {}),
       ...(responsesRequest.model ? { model: responsesRequest.model } : {}),
     })
     const completed = responseEvents.findLast((event) => event.type === "response.completed")
@@ -438,6 +441,9 @@ async function streamCommandCodeToResponsesInner(
 
   const translator = createResponsesStreamTranslator({
     responseId,
+    ...(request.previous_response_id !== undefined
+      ? { previousResponseId: request.previous_response_id }
+      : {}),
     ...(request.model ? { model: request.model } : {}),
   })
   const decoder = new TextDecoder()

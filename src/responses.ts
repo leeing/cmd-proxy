@@ -128,6 +128,27 @@ function appendInputItem(
     return
   }
 
+  if (item.type === "reasoning") {
+    const summary = Array.isArray(item.summary) ? item.summary : []
+    const text = summary
+      .filter(
+        (s): s is Record<string, unknown> =>
+          isRecord(s) && (s.type === "summary_text" || s.type === "text"),
+      )
+      .map((s) => stringValue(s.text) ?? "")
+      .filter(Boolean)
+      .join("\n")
+    if (text) {
+      const last = messages.at(-1)
+      if (last?.role === "assistant") {
+        last.content.push({ type: "reasoning", text })
+      } else {
+        messages.push({ role: "assistant", content: [{ type: "reasoning", text }] })
+      }
+    }
+    return
+  }
+
   if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
     const callId = stringValue(item.call_id) ?? ""
     messages.push({
@@ -284,7 +305,12 @@ function applyPatchDescription(name: string): string | undefined {
 
 export function responsesEventsFromCommandCodeEvents(
   commandCodeEvents: CommandCodeStreamEvent[],
-  options: { responseId?: string; model?: string; createdAt?: number } = {},
+  options: {
+    responseId?: string
+    previousResponseId?: string
+    model?: string
+    createdAt?: number
+  } = {},
 ): ResponsesStreamEvent[] {
   const translator = createResponsesStreamTranslator(options)
   const events: ResponsesStreamEvent[] = []
@@ -301,7 +327,12 @@ export interface ResponsesStreamTranslator {
 }
 
 export function createResponsesStreamTranslator(
-  options: { responseId?: string; model?: string; createdAt?: number } = {},
+  options: {
+    responseId?: string
+    previousResponseId?: string
+    model?: string
+    createdAt?: number
+  } = {},
 ): ResponsesStreamTranslator {
   const state = createResponsesState(options)
   return {
@@ -322,6 +353,7 @@ interface ResponsesState {
   events: ResponsesStreamEvent[]
   sequenceNumber: number
   responseId: string
+  previousResponseId: string | null
   itemId: string
   model: string
   createdAt: number
@@ -347,6 +379,7 @@ interface ToolCallState {
 
 function createResponsesState(options: {
   responseId?: string
+  previousResponseId?: string
   model?: string
   createdAt?: number
 }): ResponsesState {
@@ -354,6 +387,7 @@ function createResponsesState(options: {
     events: [],
     sequenceNumber: 0,
     responseId: options.responseId ?? idWithPrefix("resp"),
+    previousResponseId: options.previousResponseId ?? null,
     itemId: idWithPrefix("item"),
     model: options.model ?? DEFAULT_MODEL,
     createdAt: options.createdAt ?? Math.floor(Date.now() / 1000),
@@ -395,7 +429,7 @@ function responseObject(
     instructions: null,
     max_output_tokens: null,
     parallel_tool_calls: true,
-    previous_response_id: null,
+    previous_response_id: state.previousResponseId,
     text: { format: { type: "text" } },
     tool_choice: "auto",
     tools: [],
