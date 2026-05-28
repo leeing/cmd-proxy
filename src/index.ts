@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import "dotenv/config"
 import process from "node:process"
 
 import pino from "pino"

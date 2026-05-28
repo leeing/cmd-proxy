@@ -34,7 +34,7 @@ export function resolveModel(model: string): string {
   return model
 }
 
-export function modelList(): Array<{
+export function modelList(ownedBy = "commandcode"): Array<{
   id: string
   object: "model"
   created: number
@@ -44,6 +44,6 @@ export function modelList(): Array<{
     id,
     object: "model",
     created: 1_700_000_000,
-    owned_by: "commandcode",
+    owned_by: ownedBy,
   }))
 }

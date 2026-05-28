@@ -82,7 +82,7 @@ export async function handleRequest(
             type: error.type,
             message: error.message,
           },
-          anthropicResponseHeaders(req),
+          anthropicResponseHeaders(req, config),
         )
       } else if (error instanceof OpenAiRequestError) {
         sendOpenAiError(res, error.status, {
@@ -128,7 +128,7 @@ async function handleRequestInner(
   }
 
   if (req.method === "GET" && (url === "/models" || url === "/v1/models")) {
-    sendJson(res, 200, { object: "list", data: modelList() })
+    sendJson(res, 200, { object: "list", data: modelList(config.modelOwnedBy) })
     return
   }
 
@@ -162,7 +162,7 @@ async function handleRequestInner(
     req.method === "POST" &&
     (url === "/messages/count_tokens" || url === "/v1/messages/count_tokens")
   ) {
-    await handleMessagesCountTokens(req, res)
+    await handleMessagesCountTokens(req, res, config)
     return
   }
 
@@ -204,6 +204,9 @@ async function handleChatCompletions(
   const commandCodePayload = convertChatCompletionRequestToCommandCode(chatRequest, {
     memory: config.memory,
     taste: config.taste,
+    defaultModel: config.defaultModel,
+    maxTokens: config.maxTokens,
+    maxTokensCap: config.maxTokensCap,
     onWarning: (warning) => warnings.push(warning),
   })
   logProxyWarnings(logger, warnings)
@@ -217,7 +220,7 @@ async function handleChatCompletions(
   if (chatRequest.stream !== false) {
     sendSseHeaders(res, responseHeaders)
     const includeUsage = chatRequest.stream_options?.include_usage === true
-    await streamCommandCodeToChatCompletions(upstream, res, chatRequest.model, includeUsage)
+    await streamCommandCodeToChatCompletions(upstream, res, chatRequest.model, includeUsage, config)
     res.write("data: [DONE]\n\n")
     res.end()
   } else {
@@ -225,7 +228,12 @@ async function handleChatCompletions(
     const chunks = chatCompletionChunksFromCommandCodeEvents(commandCodeEvents, {
       ...(chatRequest.model ? { model: chatRequest.model } : {}),
     })
-    sendJson(res, 200, chatCompletionFromChunks(chunks), responseHeaders)
+    sendJson(
+      res,
+      200,
+      chatCompletionFromChunks(chunks, { defaultModel: config.defaultModel }),
+      responseHeaders,
+    )
   }
 }
 
@@ -272,6 +280,9 @@ async function handleResponses(
   const commandCodePayload = convertResponsesRequestToCommandCode(requestWithContext, {
     memory: config.memory,
     taste: config.taste,
+    defaultModel: config.defaultModel,
+    maxTokens: config.maxTokens,
+    maxTokensCap: config.maxTokensCap,
     onWarning: (warning) => warnings.push(warning),
   })
   logProxyWarnings(logger, warnings)
@@ -313,7 +324,15 @@ async function handleResponses(
 
   if (stream) {
     sendSseHeaders(res, responseHeaders)
-    await streamCommandCodeToResponses(upstream, res, responsesRequest, logger, responseId, store)
+    await streamCommandCodeToResponses(
+      upstream,
+      res,
+      responsesRequest,
+      logger,
+      responseId,
+      store,
+      config,
+    )
     if (store) store.deregisterActive(responseId)
     res.end()
   } else {
@@ -324,6 +343,7 @@ async function handleResponses(
         ? { previousResponseId: responsesRequest.previous_response_id }
         : {}),
       ...(responsesRequest.model ? { model: responsesRequest.model } : {}),
+      defaultModel: config.defaultModel,
     })
     const completed = responseEvents.findLast((event) => event.type === "response.completed")
     const response = completed?.response ?? {}
@@ -350,7 +370,7 @@ async function fetchCommandCode(
 ): Promise<Response> {
   const timeoutSignal = AbortSignal.timeout(config.upstreamTimeoutMs)
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
-  return await fetchImpl(`${config.apiBase}/alpha/generate`, {
+  return await fetchImpl(`${config.apiBase}${config.upstreamPath}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -419,10 +439,19 @@ async function streamCommandCodeToResponses(
   logger: Logger,
   responseId: string,
   store: ResponseStore | null,
+  config: AppConfig,
 ): Promise<void> {
   const stopPing = startSsePing(res)
   try {
-    await streamCommandCodeToResponsesInner(response, res, request, logger, responseId, store)
+    await streamCommandCodeToResponsesInner(
+      response,
+      res,
+      request,
+      logger,
+      responseId,
+      store,
+      config,
+    )
   } finally {
     stopPing()
   }
@@ -435,10 +464,14 @@ async function streamCommandCodeToResponsesInner(
   logger: Logger,
   responseId: string,
   store: ResponseStore | null,
+  config: AppConfig,
 ): Promise<void> {
   const reader = response.body?.getReader()
   if (!reader) {
-    for (const event of createResponsesStreamTranslator().finish()) writeResponsesEvent(res, event)
+    for (const event of createResponsesStreamTranslator({
+      defaultModel: config.defaultModel,
+    }).finish())
+      writeResponsesEvent(res, event)
     return
   }
 
@@ -448,6 +481,7 @@ async function streamCommandCodeToResponsesInner(
       ? { previousResponseId: request.previous_response_id }
       : {}),
     ...(request.model ? { model: request.model } : {}),
+    defaultModel: config.defaultModel,
   })
   const decoder = new TextDecoder()
   let buffer = ""
@@ -543,10 +577,11 @@ async function streamCommandCodeToChatCompletions(
   res: ServerResponse,
   model: string | undefined,
   includeUsage = false,
+  config: AppConfig,
 ): Promise<void> {
   const stopPing = startSsePing(res)
   try {
-    await streamCommandCodeToChatCompletionsInner(response, res, model, includeUsage)
+    await streamCommandCodeToChatCompletionsInner(response, res, model, includeUsage, config)
   } finally {
     stopPing()
   }
@@ -557,10 +592,14 @@ async function streamCommandCodeToChatCompletionsInner(
   res: ServerResponse,
   model: string | undefined,
   includeUsage: boolean,
+  config: AppConfig,
 ): Promise<void> {
   const reader = response.body?.getReader()
   if (!reader) {
-    for (const chunk of createChatCompletionStreamTranslator({ includeUsage }).finish()) {
+    for (const chunk of createChatCompletionStreamTranslator({
+      includeUsage,
+      defaultModel: config.defaultModel,
+    }).finish()) {
       writeSseData(res, chunk)
     }
     return
@@ -569,6 +608,7 @@ async function streamCommandCodeToChatCompletionsInner(
   const translator = createChatCompletionStreamTranslator({
     ...(model ? { model } : {}),
     includeUsage,
+    defaultModel: config.defaultModel,
   })
   const decoder = new TextDecoder()
   let buffer = ""
@@ -614,7 +654,7 @@ async function handleMessages(
   logger: Logger,
   fetchImpl: typeof fetch,
 ): Promise<void> {
-  const anthropicHeaders = anthropicResponseHeaders(req)
+  const anthropicHeaders = anthropicResponseHeaders(req, config)
   const request = await readJsonBody(req)
   if (!isRecord(request)) {
     sendAnthropicError(
@@ -634,6 +674,9 @@ async function handleMessages(
   const commandCodePayload = convertAnthropicRequestToCommandCode(messagesRequest, {
     memory: config.memory,
     taste: config.taste,
+    defaultModel: config.defaultModel,
+    maxTokens: config.maxTokensAnthropic,
+    maxTokensCap: config.maxTokensCap,
     betaHeaders: anthropicBetaHeaders(req),
     onWarning: (warning) => warnings.push(warning),
   })
@@ -648,20 +691,25 @@ async function handleMessages(
 
   if (messagesRequest.stream !== false) {
     sendAnthropicSseHeaders(res, responseHeaders)
-    await streamCommandCodeToMessages(upstream, res, messagesRequest.model)
+    await streamCommandCodeToMessages(upstream, res, messagesRequest.model, config)
     res.end()
   } else {
     const commandCodeEvents = await readCommandCodeEvents(upstream)
     const response = anthropicMessagesFromCommandCodeEvents(commandCodeEvents, {
       ...(messagesRequest.model ? { model: messagesRequest.model } : {}),
+      defaultModel: config.defaultModel,
     })
     res.setHeader("x-api-key", req.headers["x-api-key"] ?? "")
     sendJson(res, 200, response, responseHeaders)
   }
 }
 
-async function handleMessagesCountTokens(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const anthropicHeaders = anthropicResponseHeaders(req)
+async function handleMessagesCountTokens(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: AppConfig,
+): Promise<void> {
+  const anthropicHeaders = anthropicResponseHeaders(req, config)
   const request = await readJsonBody(req)
   if (!isRecord(request)) {
     sendAnthropicError(
@@ -688,10 +736,11 @@ async function streamCommandCodeToMessages(
   response: Response,
   res: ServerResponse,
   model: string | undefined,
+  config: AppConfig,
 ): Promise<void> {
   const stopPing = startSsePing(res)
   try {
-    await streamCommandCodeToMessagesInner(response, res, model)
+    await streamCommandCodeToMessagesInner(response, res, model, config)
   } finally {
     stopPing()
   }
@@ -701,10 +750,13 @@ async function streamCommandCodeToMessagesInner(
   response: Response,
   res: ServerResponse,
   model: string | undefined,
+  config: AppConfig,
 ): Promise<void> {
   const reader = response.body?.getReader()
   if (!reader) {
-    const { events } = createAnthropicMessagesStreamTranslator().finish()
+    const { events } = createAnthropicMessagesStreamTranslator({
+      defaultModel: config.defaultModel,
+    }).finish()
     for (const sseEvent of events) {
       writeAnthropicSseEvent(res, sseEvent)
     }
@@ -713,6 +765,7 @@ async function streamCommandCodeToMessagesInner(
 
   const translator = createAnthropicMessagesStreamTranslator({
     ...(model ? { model } : {}),
+    defaultModel: config.defaultModel,
   })
   const decoder = new TextDecoder()
   let buffer = ""
@@ -746,7 +799,7 @@ function sendAnthropicError(
   res: ServerResponse,
   status: number,
   error: { type: string; message: string },
-  extraHeaders: Record<string, string> = { "anthropic-version": "2023-06-01" },
+  extraHeaders: Record<string, string>,
 ): void {
   sendJson(res, status, { type: "error", error }, extraHeaders)
 }
@@ -798,10 +851,7 @@ function startSsePing(res: ServerResponse): () => void {
   return () => clearInterval(interval)
 }
 
-function sendAnthropicSseHeaders(
-  res: ServerResponse,
-  extraHeaders: Record<string, string> = { "anthropic-version": "2023-06-01" },
-): void {
+function sendAnthropicSseHeaders(res: ServerResponse, extraHeaders: Record<string, string>): void {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -866,9 +916,9 @@ function corsHeaders(): Record<string, string> {
   }
 }
 
-function anthropicResponseHeaders(req: IncomingMessage): Record<string, string> {
+function anthropicResponseHeaders(req: IncomingMessage, config: AppConfig): Record<string, string> {
   const headers: Record<string, string> = {
-    "anthropic-version": String(req.headers["anthropic-version"] ?? "2023-06-01"),
+    "anthropic-version": String(req.headers["anthropic-version"] ?? config.anthropicApiVersion),
     "request-id": `req_${randomUUID()}`,
   }
   const beta = req.headers["anthropic-beta"]

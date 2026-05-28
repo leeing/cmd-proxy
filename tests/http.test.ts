@@ -23,6 +23,13 @@ function mockConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     tasteLearning: "false",
     coFlag: "false",
     customModelMap: {},
+    defaultModel: "deepseek-v4-pro",
+    maxTokens: 32_000,
+    maxTokensAnthropic: 4_096,
+    maxTokensCap: 200_000,
+    anthropicApiVersion: "2023-06-01",
+    upstreamPath: "/alpha/generate",
+    modelOwnedBy: "commandcode",
     ...overrides,
   }
 }

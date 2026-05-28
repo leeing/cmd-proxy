@@ -212,11 +212,77 @@ type AnthropicSseDelta =
 
 // --- Constants ---
 
-const DEFAULT_MODEL = "deepseek-v4-pro"
-const DEFAULT_MAX_TOKENS = 4_096
-const MAX_TOKENS = 200_000
+interface BuiltinToolRef {
+  name: string
+  description: string
+  input_schema: Record<string, unknown>
+}
 
-const SYSTEM_PROMPT = ""
+const BUILTIN_TOOLS: Record<string, BuiltinToolRef> = {
+  web_search_20250305: {
+    name: "web_search",
+    description: "Search the web for current information.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "The search query" },
+      },
+      required: ["query"],
+    },
+  },
+  text_editor_20250124: {
+    name: "text_editor",
+    description: "View or edit a file in the workspace.",
+    input_schema: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          enum: ["view", "create", "str_replace", "insert", "undo_edit"],
+        },
+        path: { type: "string" },
+        file_text: { type: "string" },
+        insert_line: { type: "number" },
+        new_str: { type: "string" },
+        old_str: { type: "string" },
+        view_range: { type: "array", items: { type: "number" } },
+      },
+      required: ["command", "path"],
+    },
+  },
+  computer_20250124: {
+    name: "computer",
+    description: "Interact with a computer desktop through mouse and keyboard actions.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "key",
+            "type",
+            "mouse_move",
+            "left_click",
+            "left_click_drag",
+            "right_click",
+            "middle_click",
+            "double_click",
+            "screenshot",
+            "cursor_position",
+          ],
+        },
+        coordinate: { type: "array", items: { type: "number" } },
+        text: { type: "string" },
+      },
+      required: ["action"],
+    },
+  },
+}
+
+const BETA_FEATURE_REQUIREMENTS: Record<string, string[]> = {
+  mcp_servers: ["mcp-client-2025-11-20", "mcp-client-2025-04-04"],
+  context_management: ["context-management-2025-06-27"],
+}
 
 // --- Request Conversion ---
 
@@ -227,10 +293,14 @@ export function convertAnthropicRequestToCommandCode(
     now?: Date
     memory?: string
     taste?: string
+    defaultModel?: string
+    maxTokens?: number
+    maxTokensCap?: number
     betaHeaders?: string[]
     onWarning?: (warning: string) => void
   } = {},
 ): CommandCodePayload {
+  const { defaultModel = "deepseek-v4-pro", maxTokens = 4_096, maxTokensCap = 200_000 } = options
   validateAnthropicRequest(request, options.betaHeaders ?? [], {
     requireMaxTokens: true,
     onWarning: options.onWarning,
@@ -250,11 +320,11 @@ export function convertAnthropicRequestToCommandCode(
   }
 
   const params: CommandCodeParams = {
-    model: resolveModel(request.model ?? DEFAULT_MODEL),
+    model: resolveModel(request.model ?? defaultModel),
     messages,
     tools: convertAnthropicTools(request.tools, options.onWarning),
     system: systemParts.join("\n\n"),
-    max_tokens: Math.min(request.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_TOKENS),
+    max_tokens: Math.min(request.max_tokens ?? maxTokens, maxTokensCap),
     stream: true,
   }
 
@@ -347,7 +417,7 @@ function normalizeSystem(system: string | AnthropicTextBlock[] | undefined): str
       .map((block) => block.text)
       .join("\n")
   }
-  return SYSTEM_PROMPT
+  return ""
 }
 
 function appendAnthropicMessage(
@@ -458,13 +528,15 @@ function warnAboutUnsupportedAnthropicRequest(
   betaHeaders: string[],
   onWarning?: (warning: string) => void,
 ): void {
-  warnMissingBetaForField(request, betaHeaders, onWarning, "mcp_servers", [
-    "mcp-client-2025-11-20",
-    "mcp-client-2025-04-04",
-  ])
-  warnMissingBetaForField(request, betaHeaders, onWarning, "context_management", [
-    "context-management-2025-06-27",
-  ])
+  for (const [field, allowedBetas] of Object.entries(BETA_FEATURE_REQUIREMENTS)) {
+    warnMissingBetaForField(
+      request,
+      betaHeaders,
+      onWarning,
+      field as keyof AnthropicMessageRequest,
+      allowedBetas,
+    )
+  }
 
   for (const field of ["container", "mcp_servers"] as const) {
     if (request[field] !== undefined) {
@@ -597,75 +669,8 @@ function convertAnthropicTools(
   return converted
 }
 
-function getBuiltinToolSchema(
-  type: string,
-  _tool: AnthropicTool,
-): { name: string; input_schema: Record<string, unknown>; description: string } | undefined {
-  if (type === "web_search_20250305") {
-    return {
-      name: "web_search",
-      description: "Search the web for current information.",
-      input_schema: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "The search query" },
-        },
-        required: ["query"],
-      },
-    }
-  }
-  if (type === "text_editor_20250124") {
-    return {
-      name: "text_editor",
-      description: "View or edit a file in the workspace.",
-      input_schema: {
-        type: "object",
-        properties: {
-          command: {
-            type: "string",
-            enum: ["view", "create", "str_replace", "insert", "undo_edit"],
-          },
-          path: { type: "string" },
-          file_text: { type: "string" },
-          insert_line: { type: "number" },
-          new_str: { type: "string" },
-          old_str: { type: "string" },
-          view_range: { type: "array", items: { type: "number" } },
-        },
-        required: ["command", "path"],
-      },
-    }
-  }
-  if (type === "computer_20250124") {
-    return {
-      name: "computer",
-      description: "Interact with a computer desktop through mouse and keyboard actions.",
-      input_schema: {
-        type: "object",
-        properties: {
-          action: {
-            type: "string",
-            enum: [
-              "key",
-              "type",
-              "mouse_move",
-              "left_click",
-              "left_click_drag",
-              "right_click",
-              "middle_click",
-              "double_click",
-              "screenshot",
-              "cursor_position",
-            ],
-          },
-          coordinate: { type: "array", items: { type: "number" } },
-          text: { type: "string" },
-        },
-        required: ["action"],
-      },
-    }
-  }
-  return undefined
+function getBuiltinToolSchema(type: string, _tool: AnthropicTool): BuiltinToolRef | undefined {
+  return BUILTIN_TOOLS[type]
 }
 
 export function isAnthropicRequestError(error: unknown): error is AnthropicRequestError {
@@ -758,7 +763,7 @@ function mapToolChoice(toolChoice: AnthropicToolChoice): unknown {
 
 export function anthropicMessagesFromCommandCodeEvents(
   commandCodeEvents: CommandCodeStreamEvent[],
-  options: { messageId?: string; model?: string } = {},
+  options: { messageId?: string; model?: string; defaultModel?: string } = {},
 ): AnthropicMessageResponse {
   const translator = createAnthropicMessagesStreamTranslator(options)
   for (const event of commandCodeEvents) {
@@ -775,9 +780,10 @@ export interface AnthropicMessagesStreamTranslator {
 }
 
 export function createAnthropicMessagesStreamTranslator(
-  options: { messageId?: string; model?: string } = {},
+  options: { messageId?: string; model?: string; defaultModel?: string } = {},
 ): AnthropicMessagesStreamTranslator {
-  const state = createAnthropicState(options)
+  const defaultModel = options.defaultModel ?? "deepseek-v4-pro"
+  const state = createAnthropicState({ ...options, defaultModel })
 
   return {
     push(event): AnthropicSseEvent[] {
@@ -822,11 +828,16 @@ interface AnthropicState {
   finished: boolean
 }
 
-function createAnthropicState(options: { messageId?: string; model?: string }): AnthropicState {
+function createAnthropicState(options: {
+  messageId?: string
+  model?: string
+  defaultModel?: string
+}): AnthropicState {
+  const defaultModel = options.defaultModel ?? "deepseek-v4-pro"
   return {
     events: [],
     messageId: options.messageId ?? idWithPrefix("msg"),
-    model: options.model ?? DEFAULT_MODEL,
+    model: options.model ?? defaultModel,
     contentBlocks: [],
     currentBlockIndex: 0,
     currentTextBlock: null,

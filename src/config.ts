@@ -14,6 +14,13 @@ const envSchema = z.object({
   CMD_PROXY_TASTE_LEARNING: z.string().default("false"),
   CMD_PROXY_CO_FLAG: z.string().default("false"),
   CMD_PROXY_MODEL_MAP: z.string().default(""),
+  CMD_PROXY_DEFAULT_MODEL: z.string().default("deepseek-v4-pro"),
+  CMD_PROXY_MAX_TOKENS: z.coerce.number().int().min(1).default(32_000),
+  CMD_PROXY_MAX_TOKENS_ANTHROPIC: z.coerce.number().int().min(1).default(4_096),
+  CMD_PROXY_MAX_TOKENS_CAP: z.coerce.number().int().min(1).default(200_000),
+  CMD_PROXY_ANTHROPIC_API_VERSION: z.string().default("2023-06-01"),
+  CMD_PROXY_UPSTREAM_PATH: z.string().default("/alpha/generate"),
+  CMD_PROXY_MODEL_OWNED_BY: z.string().default("commandcode"),
 })
 
 export interface AppConfig {
@@ -30,6 +37,13 @@ export interface AppConfig {
   tasteLearning: string
   coFlag: string
   customModelMap: Record<string, string>
+  defaultModel: string
+  maxTokens: number
+  maxTokensAnthropic: number
+  maxTokensCap: number
+  anthropicApiVersion: string
+  upstreamPath: string
+  modelOwnedBy: string
 }
 
 export function loadConfig(env: Record<string, string | undefined>): AppConfig {
@@ -48,6 +62,13 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     tasteLearning: parsed.CMD_PROXY_TASTE_LEARNING,
     coFlag: parsed.CMD_PROXY_CO_FLAG,
     customModelMap: parseModelMap(parsed.CMD_PROXY_MODEL_MAP),
+    defaultModel: parsed.CMD_PROXY_DEFAULT_MODEL,
+    maxTokens: parsed.CMD_PROXY_MAX_TOKENS,
+    maxTokensAnthropic: parsed.CMD_PROXY_MAX_TOKENS_ANTHROPIC,
+    maxTokensCap: parsed.CMD_PROXY_MAX_TOKENS_CAP,
+    anthropicApiVersion: parsed.CMD_PROXY_ANTHROPIC_API_VERSION,
+    upstreamPath: parsed.CMD_PROXY_UPSTREAM_PATH,
+    modelOwnedBy: parsed.CMD_PROXY_MODEL_OWNED_BY,
   }
 }
 

@@ -26,10 +26,6 @@ import {
   toObjectJsonSchema,
 } from "./utils.ts"
 
-const DEFAULT_MODEL = "deepseek-v4-pro"
-const DEFAULT_MAX_OUTPUT_TOKENS = 32_000
-const MAX_OUTPUT_TOKENS = 200_000
-
 export function convertResponsesRequestToCommandCode(
   request: ResponsesRequest,
   options: {
@@ -37,9 +33,13 @@ export function convertResponsesRequestToCommandCode(
     now?: Date
     memory?: string
     taste?: string
+    defaultModel?: string
+    maxTokens?: number
+    maxTokensCap?: number
     onWarning?: (warning: string) => void
   } = {},
 ): CommandCodePayload {
+  const { defaultModel = "deepseek-v4-pro", maxTokens = 32_000, maxTokensCap = 200_000 } = options
   const messages: CommandCodeMessage[] = []
   const toolNamesByCallId = new Map<string, string>()
   const systemParts = [request.instructions].filter((part): part is string => Boolean(part))
@@ -54,11 +54,11 @@ export function convertResponsesRequestToCommandCode(
   }
 
   const params: CommandCodeParams = {
-    model: resolveModel(request.model ?? DEFAULT_MODEL),
+    model: resolveModel(request.model ?? defaultModel),
     messages,
     tools: request.tool_choice === "none" ? [] : convertTools(request.tools, options.onWarning),
     system: systemParts.join("\n\n"),
-    max_tokens: Math.min(request.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
+    max_tokens: Math.min(request.max_output_tokens ?? maxTokens, maxTokensCap),
     stream: true,
   }
 
@@ -309,6 +309,7 @@ export function responsesEventsFromCommandCodeEvents(
     responseId?: string
     previousResponseId?: string
     model?: string
+    defaultModel?: string
     createdAt?: number
   } = {},
 ): ResponsesStreamEvent[] {
@@ -331,10 +332,12 @@ export function createResponsesStreamTranslator(
     responseId?: string
     previousResponseId?: string
     model?: string
+    defaultModel?: string
     createdAt?: number
   } = {},
 ): ResponsesStreamTranslator {
-  const state = createResponsesState(options)
+  const defaultModel = options.defaultModel ?? "deepseek-v4-pro"
+  const state = createResponsesState({ ...options, defaultModel })
   return {
     push(event) {
       const start = state.events.length
@@ -381,15 +384,17 @@ function createResponsesState(options: {
   responseId?: string
   previousResponseId?: string
   model?: string
+  defaultModel?: string
   createdAt?: number
 }): ResponsesState {
+  const defaultModel = options.defaultModel ?? "deepseek-v4-pro"
   return {
     events: [],
     sequenceNumber: 0,
     responseId: options.responseId ?? idWithPrefix("resp"),
     previousResponseId: options.previousResponseId ?? null,
     itemId: idWithPrefix("item"),
-    model: options.model ?? DEFAULT_MODEL,
+    model: options.model ?? defaultModel,
     createdAt: options.createdAt ?? Math.floor(Date.now() / 1000),
     outputIndex: 0,
     textContent: "",

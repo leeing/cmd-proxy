@@ -21,10 +21,6 @@ import {
   toObjectJsonSchema,
 } from "./utils.ts"
 
-const DEFAULT_MODEL = "deepseek-v4-pro"
-const DEFAULT_MAX_TOKENS = 32_000
-const MAX_TOKENS = 200_000
-
 export interface ChatCompletionRequest {
   model?: string
   messages?: ChatMessage[]
@@ -118,9 +114,13 @@ export function convertChatCompletionRequestToCommandCode(
     now?: Date
     memory?: string
     taste?: string
+    defaultModel?: string
+    maxTokens?: number
+    maxTokensCap?: number
     onWarning?: (warning: string) => void
   } = {},
 ): CommandCodePayload {
+  const { defaultModel = "deepseek-v4-pro", maxTokens = 32_000, maxTokensCap = 200_000 } = options
   const systemParts: string[] = []
   const messages: CommandCodeMessage[] = []
   const toolNamesByCallId = new Map<string, string>()
@@ -130,13 +130,13 @@ export function convertChatCompletionRequestToCommandCode(
   }
 
   const params: CommandCodeParams = {
-    model: resolveModel(request.model ?? DEFAULT_MODEL),
+    model: resolveModel(request.model ?? defaultModel),
     messages,
     tools: request.tool_choice === "none" ? [] : convertChatTools(request.tools, options.onWarning),
     system: systemParts.join("\n\n"),
     max_tokens: Math.min(
-      request.max_completion_tokens ?? request.max_tokens ?? DEFAULT_MAX_TOKENS,
-      MAX_TOKENS,
+      request.max_completion_tokens ?? request.max_tokens ?? maxTokens,
+      maxTokensCap,
     ),
     stream: true,
   }
@@ -320,12 +320,19 @@ export interface ChatCompletionStreamTranslator {
 }
 
 export function createChatCompletionStreamTranslator(
-  options: { completionId?: string; model?: string; created?: number; includeUsage?: boolean } = {},
+  options: {
+    completionId?: string
+    model?: string
+    defaultModel?: string
+    created?: number
+    includeUsage?: boolean
+  } = {},
 ): ChatCompletionStreamTranslator {
+  const { defaultModel = "deepseek-v4-pro" } = options
   const state: ChatState = {
     chunks: [],
     completionId: options.completionId ?? idWithPrefix("chatcmpl"),
-    model: options.model ?? DEFAULT_MODEL,
+    model: options.model ?? defaultModel,
     created: options.created ?? Math.floor(Date.now() / 1000),
     sentRole: false,
     finishReason: null,
@@ -498,7 +505,11 @@ function mapChatFinishReason(reason: unknown): "stop" | "length" | "tool_calls" 
   return "stop"
 }
 
-export function chatCompletionFromChunks(chunks: ChatCompletionChunk[]): ChatCompletionResponse {
+export function chatCompletionFromChunks(
+  chunks: ChatCompletionChunk[],
+  options: { defaultModel?: string } = {},
+): ChatCompletionResponse {
+  const defaultModel = options.defaultModel ?? "deepseek-v4-pro"
   const last = chunks.findLast((chunk) => chunk.choices.length > 0) ?? chunks.at(-1)
   const usageChunk = chunks.findLast((chunk) => chunk.usage !== undefined)
   const content = chunks.map((chunk) => chunk.choices[0]?.delta.content ?? "").join("")
@@ -507,7 +518,7 @@ export function chatCompletionFromChunks(chunks: ChatCompletionChunk[]): ChatCom
     id: last?.id ?? idWithPrefix("chatcmpl"),
     object: "chat.completion",
     created: last?.created ?? Math.floor(Date.now() / 1000),
-    model: last?.model ?? DEFAULT_MODEL,
+    model: last?.model ?? defaultModel,
     choices: [
       {
         index: 0,
