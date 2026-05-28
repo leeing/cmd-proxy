@@ -102,6 +102,82 @@ describe("convertResponsesRequestToCommandCode", () => {
     expect(expectToolResult(result.params.messages[1]?.content[0]).toolName).toBe("read_file")
   })
 
+  it("converts reasoning input items to Command Code reasoning content blocks", () => {
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: [
+        {
+          type: "reasoning",
+          id: "rsn_1",
+          status: "completed",
+          summary: [{ type: "summary_text", text: "Let me think about this" }],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Here's the answer" }],
+        },
+      ],
+    })
+
+    expect(result.params.messages).toHaveLength(2)
+    const reasoningMsg = result.params.messages[0]
+    expect(reasoningMsg?.role).toBe("assistant")
+    expect(reasoningMsg?.content).toEqual([{ type: "reasoning", text: "Let me think about this" }])
+    const textMsg = result.params.messages[1]
+    expect(textMsg?.role).toBe("assistant")
+    expect(textMsg?.content).toEqual([{ type: "text", text: "Here's the answer" }])
+  })
+
+  it("adds reasoning content block to existing assistant message", () => {
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "I'll help" }],
+        },
+        {
+          type: "reasoning",
+          id: "rsn_2",
+          status: "completed",
+          summary: [{ type: "summary_text", text: "Thought process" }],
+        },
+      ],
+    })
+
+    const assistantContent = result.params.messages[0]?.content
+    expect(assistantContent?.length).toBe(2)
+    expect(assistantContent?.[0]).toEqual({ type: "text", text: "I'll help" })
+    expect(assistantContent?.[1]).toEqual({
+      type: "reasoning",
+      text: "Thought process",
+    })
+  })
+
+  it("skips empty reasoning input items", () => {
+    const result = convertResponsesRequestToCommandCode({
+      model: "deepseek-v4-pro",
+      input: [
+        {
+          type: "reasoning",
+          id: "rsn_3",
+          status: "completed",
+          summary: [],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "hello" }],
+        },
+      ],
+    })
+
+    expect(result.params.messages).toHaveLength(1)
+    expect(result.params.messages[0]?.role).toBe("user")
+  })
+
   it("passes supported sampling parameters and object tool choice through", () => {
     const result = convertResponsesRequestToCommandCode({
       model: "deepseek-v4-pro",

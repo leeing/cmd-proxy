@@ -352,6 +352,66 @@ describe("convertAnthropicRequestToCommandCode", () => {
     })
   })
 
+  it("maps output_config thinking to Command Code params", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hi" }],
+      output_config: {
+        type: "thinking",
+        thinking: { type: "enabled", budget_tokens: 32000 },
+      },
+      max_tokens: 4096,
+    })
+    expect(result.params.thinking).toEqual({
+      type: "enabled",
+      budget_tokens: 32000,
+    })
+  })
+
+  it("prefers output_config over thinking field for thinking config", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hi" }],
+      thinking: { type: "enabled", budget_tokens: 8000 },
+      output_config: {
+        type: "thinking",
+        thinking: { type: "enabled", budget_tokens: 32000 },
+      },
+      max_tokens: 4096,
+    })
+    expect(result.params.thinking).toEqual({
+      type: "enabled",
+      budget_tokens: 32000,
+    })
+  })
+
+  it("converts Anthropic thinking content block to Command Code reasoning", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Let me analyze...", signature: "sig_abc" },
+            { type: "text", text: "Here's the answer" },
+          ],
+        },
+      ],
+      max_tokens: 4096,
+    })
+
+    expect(result.params.messages).toHaveLength(2)
+    const assistantContent = result.params.messages[1]?.content
+    expect(assistantContent?.length).toBe(2)
+    expect(assistantContent?.[0]).toEqual({
+      type: "reasoning",
+      text: "Let me analyze...",
+      signature: "sig_abc",
+    })
+    expect(assistantContent?.[1]).toEqual({ type: "text", text: "Here's the answer" })
+  })
+
   it("forwards top_k to Command Code params", () => {
     const result = convertAnthropicRequestToCommandCode({
       model: "claude-sonnet-4-6",
@@ -494,6 +554,56 @@ describe("convertAnthropicRequestToCommandCode", () => {
     ])
   })
 
+  it("maps built-in Anthropic text_editor tool as function tool", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "edit file" }],
+      tools: [{ type: "text_editor_20250124", name: "text_editor" }],
+      max_tokens: 4096,
+    })
+
+    expect(result.params.tools).toHaveLength(1)
+    const tool = result.params.tools[0]
+    expect(tool?.name).toBe("text_editor")
+    expect(tool?.type).toBe("function")
+    expect(tool?.description).toContain("edit")
+    const schema = tool?.input_schema as Record<string, unknown>
+    expect(schema?.required).toContain("command")
+    expect(schema?.required).toContain("path")
+  })
+
+  it("maps built-in Anthropic computer tool as function tool", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "screenshot" }],
+      tools: [{ type: "computer_20250124", name: "computer" }],
+      max_tokens: 4096,
+    })
+
+    expect(result.params.tools).toHaveLength(1)
+    const tool = result.params.tools[0]
+    expect(tool?.name).toBe("computer")
+    expect(tool?.type).toBe("function")
+    const schema = tool?.input_schema as Record<string, unknown>
+    expect(schema?.required).toContain("action")
+  })
+
+  it("still warns and drops truly unknown tool types", () => {
+    const warnings: string[] = []
+    const result = convertAnthropicRequestToCommandCode(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ type: "some_future_tool_type", name: "future" }],
+        max_tokens: 4096,
+      },
+      { onWarning: (warning) => warnings.push(warning) },
+    )
+
+    expect(result.params.tools).toEqual([])
+    expect(warnings).toContain("Ignored unsupported Anthropic tool type: some_future_tool_type")
+  })
+
   it("forwards lightweight Anthropic request metadata and service tier", () => {
     const result = convertAnthropicRequestToCommandCode({
       model: "claude-sonnet-4-6",
@@ -561,6 +671,15 @@ describe("convertAnthropicRequestToCommandCode", () => {
     )
 
     expect(result.params.messages[0]?.role).toBe("user")
+    expect(result.params.context_management).toEqual({
+      edits: [
+        {
+          type: "clear_tool_uses_20250919",
+          trigger: { type: "input_tokens", value: 30000 },
+          keep: { type: "tool_uses", value: 5 },
+        },
+      ],
+    })
   })
 
   it("preserves cache_control on text blocks, tool results, and tools", () => {
