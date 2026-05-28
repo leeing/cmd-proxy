@@ -113,7 +113,13 @@ interface ChatToolCall {
 
 export function convertChatCompletionRequestToCommandCode(
   request: ChatCompletionRequest,
-  options: { cwd?: string; now?: Date; memory?: string; taste?: string } = {},
+  options: {
+    cwd?: string
+    now?: Date
+    memory?: string
+    taste?: string
+    onWarning?: (warning: string) => void
+  } = {},
 ): CommandCodePayload {
   const systemParts: string[] = []
   const messages: CommandCodeMessage[] = []
@@ -126,7 +132,7 @@ export function convertChatCompletionRequestToCommandCode(
   const params: CommandCodeParams = {
     model: resolveModel(request.model ?? DEFAULT_MODEL),
     messages,
-    tools: request.tool_choice === "none" ? [] : convertChatTools(request.tools),
+    tools: request.tool_choice === "none" ? [] : convertChatTools(request.tools, options.onWarning),
     system: systemParts.join("\n\n"),
     max_tokens: Math.min(
       request.max_completion_tokens ?? request.max_tokens ?? DEFAULT_MAX_TOKENS,
@@ -269,13 +275,19 @@ function chatToolCalls(
   })
 }
 
-function convertChatTools(tools: unknown): CommandCodeTool[] {
+function convertChatTools(
+  tools: unknown,
+  onWarning?: (warning: string) => void,
+): CommandCodeTool[] {
   if (!Array.isArray(tools)) return []
   const converted: CommandCodeTool[] = []
   for (const tool of tools) {
     if (!isRecord(tool)) continue
     const type = stringValue(tool.type)
-    if (type && type !== "function") continue
+    if (type && type !== "function") {
+      onWarning?.(`Ignored unsupported OpenAI Chat Completions tool type: ${type}`)
+      continue
+    }
     const fn = isRecord(tool.function) ? tool.function : undefined
     const name = stringValue(fn?.name) ?? stringValue(tool.name)
     if (!name) continue

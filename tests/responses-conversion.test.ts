@@ -244,14 +244,19 @@ describe("convertResponsesRequestToCommandCode", () => {
     ])
   })
 
-  it("rejects unsupported Responses built-in tools instead of dropping them", () => {
-    expect(() =>
-      convertResponsesRequestToCommandCode({
+  it("warns and drops unsupported Responses built-in tools instead of blocking", () => {
+    const warnings: string[] = []
+    const result = convertResponsesRequestToCommandCode(
+      {
         model: "deepseek-v4-pro",
         input: "hi",
         tools: [{ type: "web_search_preview" }],
-      }),
-    ).toThrow("Unsupported OpenAI Responses tool type: web_search_preview")
+      },
+      { onWarning: (warning) => warnings.push(warning) },
+    )
+
+    expect(result.params.tools).toEqual([])
+    expect(warnings).toContain("Ignored unsupported OpenAI Responses tool type: web_search_preview")
   })
 })
 

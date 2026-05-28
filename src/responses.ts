@@ -1,6 +1,5 @@
 import process from "node:process"
 
-import { OpenAiRequestError } from "./errors.ts"
 import { resolveModel } from "./models.ts"
 import type {
   CommandCodeContent,
@@ -33,7 +32,13 @@ const MAX_OUTPUT_TOKENS = 200_000
 
 export function convertResponsesRequestToCommandCode(
   request: ResponsesRequest,
-  options: { cwd?: string; now?: Date; memory?: string; taste?: string } = {},
+  options: {
+    cwd?: string
+    now?: Date
+    memory?: string
+    taste?: string
+    onWarning?: (warning: string) => void
+  } = {},
 ): CommandCodePayload {
   const messages: CommandCodeMessage[] = []
   const toolNamesByCallId = new Map<string, string>()
@@ -51,7 +56,7 @@ export function convertResponsesRequestToCommandCode(
   const params: CommandCodeParams = {
     model: resolveModel(request.model ?? DEFAULT_MODEL),
     messages,
-    tools: request.tool_choice === "none" ? [] : convertTools(request.tools),
+    tools: request.tool_choice === "none" ? [] : convertTools(request.tools, options.onWarning),
     system: systemParts.join("\n\n"),
     max_tokens: Math.min(request.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
     stream: true,
@@ -212,7 +217,7 @@ function customToolInput(item: Record<string, unknown>): { input: string } | und
   return { input: stringValue(item.input) ?? "" }
 }
 
-function convertTools(tools: unknown): CommandCodeTool[] {
+function convertTools(tools: unknown, onWarning?: (warning: string) => void): CommandCodeTool[] {
   if (!Array.isArray(tools)) return []
   const converted: CommandCodeTool[] = []
 
@@ -220,10 +225,8 @@ function convertTools(tools: unknown): CommandCodeTool[] {
     if (!isRecord(tool)) continue
     const type = stringValue(tool.type)
     if (type && type !== "function" && type !== "custom") {
-      throw new OpenAiRequestError(`Unsupported OpenAI Responses tool type: ${type}`, {
-        code: "unsupported_tool",
-        param: "tools",
-      })
+      onWarning?.(`Ignored unsupported OpenAI Responses tool type: ${type}`)
+      continue
     }
 
     const fn = isRecord(tool.function) ? tool.function : undefined

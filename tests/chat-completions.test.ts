@@ -92,6 +92,23 @@ describe("convertChatCompletionRequestToCommandCode", () => {
     expect(result.params.tool_choice).toBeUndefined()
   })
 
+  it("warns and drops unsupported Chat Completions tool types", () => {
+    const warnings: string[] = []
+    const result = convertChatCompletionRequestToCommandCode(
+      {
+        model: "deepseek-v4-pro",
+        messages: [{ role: "user", content: "search" }],
+        tools: [{ type: "web_search_preview", name: "web_search" }],
+      },
+      { onWarning: (warning) => warnings.push(warning) },
+    )
+
+    expect(result.params.tools).toEqual([])
+    expect(warnings).toContain(
+      "Ignored unsupported OpenAI Chat Completions tool type: web_search_preview",
+    )
+  })
+
   it("forwards max_completion_tokens before max_tokens and seed", () => {
     const result = convertChatCompletionRequestToCommandCode({
       model: "deepseek-v4-pro",

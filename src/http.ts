@@ -199,10 +199,14 @@ async function handleChatCompletions(
   }
 
   const chatRequest = request as ChatCompletionRequest
+  const warnings: string[] = []
   const commandCodePayload = convertChatCompletionRequestToCommandCode(chatRequest, {
     memory: config.memory,
     taste: config.taste,
+    onWarning: (warning) => warnings.push(warning),
   })
+  logProxyWarnings(logger, warnings)
+  const responseHeaders = withProxyWarnings({}, warnings)
   const upstream = await fetchCommandCode(req, config, fetchImpl, commandCodePayload)
   if (!upstream.ok) {
     await sendUpstreamError(upstream, res, logger)
@@ -210,7 +214,7 @@ async function handleChatCompletions(
   }
 
   if (chatRequest.stream !== false) {
-    sendSseHeaders(res)
+    sendSseHeaders(res, responseHeaders)
     const includeUsage = chatRequest.stream_options?.include_usage === true
     await streamCommandCodeToChatCompletions(upstream, res, chatRequest.model, includeUsage)
     res.write("data: [DONE]\n\n")
@@ -220,7 +224,7 @@ async function handleChatCompletions(
     const chunks = chatCompletionChunksFromCommandCodeEvents(commandCodeEvents, {
       ...(chatRequest.model ? { model: chatRequest.model } : {}),
     })
-    sendJson(res, 200, chatCompletionFromChunks(chunks))
+    sendJson(res, 200, chatCompletionFromChunks(chunks), responseHeaders)
   }
 }
 
@@ -261,10 +265,14 @@ async function handleResponses(
     ? { ...responsesRequest, input: inputWithContext }
     : responsesRequest
 
+  const warnings: string[] = []
   const commandCodePayload = convertResponsesRequestToCommandCode(requestWithContext, {
     memory: config.memory,
     taste: config.taste,
+    onWarning: (warning) => warnings.push(warning),
   })
+  logProxyWarnings(logger, warnings)
+  const responseHeaders = withProxyWarnings({}, warnings)
   logger.debug(
     {
       commandCodeModel: commandCodePayload.params.model,
@@ -301,7 +309,7 @@ async function handleResponses(
   }
 
   if (stream) {
-    sendSseHeaders(res)
+    sendSseHeaders(res, responseHeaders)
     await streamCommandCodeToResponses(upstream, res, responsesRequest, logger, responseId, store)
     if (store) store.deregisterActive(responseId)
     res.end()
@@ -323,7 +331,7 @@ async function handleResponses(
       })
       store.deregisterActive(responseId)
     }
-    sendJson(res, 200, response)
+    sendJson(res, 200, response, responseHeaders)
   }
 }
 
@@ -613,20 +621,24 @@ async function handleMessages(
   }
 
   const messagesRequest = request as AnthropicMessageRequest
+  const warnings: string[] = []
   const commandCodePayload = convertAnthropicRequestToCommandCode(messagesRequest, {
     memory: config.memory,
     taste: config.taste,
     betaHeaders: anthropicBetaHeaders(req),
+    onWarning: (warning) => warnings.push(warning),
   })
+  logProxyWarnings(logger, warnings)
+  const responseHeaders = withProxyWarnings(anthropicHeaders, warnings)
   const upstream = await fetchCommandCode(req, config, fetchImpl, commandCodePayload)
 
   if (!upstream.ok) {
-    await sendUpstreamAnthropicError(upstream, res, logger, anthropicHeaders)
+    await sendUpstreamAnthropicError(upstream, res, logger, responseHeaders)
     return
   }
 
   if (messagesRequest.stream !== false) {
-    sendAnthropicSseHeaders(res, anthropicHeaders)
+    sendAnthropicSseHeaders(res, responseHeaders)
     await streamCommandCodeToMessages(upstream, res, messagesRequest.model)
     res.end()
   } else {
@@ -635,7 +647,7 @@ async function handleMessages(
       ...(messagesRequest.model ? { model: messagesRequest.model } : {}),
     })
     res.setHeader("x-api-key", req.headers["x-api-key"] ?? "")
-    sendJson(res, 200, response, anthropicHeaders)
+    sendJson(res, 200, response, responseHeaders)
   }
 }
 
@@ -655,10 +667,12 @@ async function handleMessagesCountTokens(req: IncomingMessage, res: ServerRespon
     return
   }
 
+  const warnings: string[] = []
   const response = countAnthropicInputTokens(request as AnthropicMessageRequest, {
     betaHeaders: anthropicBetaHeaders(req),
+    onWarning: (warning) => warnings.push(warning),
   })
-  sendJson(res, 200, response, anthropicHeaders)
+  sendJson(res, 200, response, withProxyWarnings(anthropicHeaders, warnings))
 }
 
 async function streamCommandCodeToMessages(
@@ -790,13 +804,14 @@ function sendAnthropicSseHeaders(
   res.flushHeaders()
 }
 
-function sendSseHeaders(res: ServerResponse): void {
+function sendSseHeaders(res: ServerResponse, extraHeaders: Record<string, string> = {}): void {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
     ...corsHeaders(),
+    ...extraHeaders,
   })
   res.flushHeaders()
 }
@@ -850,6 +865,24 @@ function anthropicResponseHeaders(req: IncomingMessage): Record<string, string> 
   const beta = req.headers["anthropic-beta"]
   if (typeof beta === "string" && beta.length > 0) headers["anthropic-beta"] = beta
   return headers
+}
+
+function withProxyWarnings(
+  headers: Record<string, string>,
+  warnings: string[],
+): Record<string, string> {
+  if (warnings.length === 0) return headers
+  return { ...headers, "x-cmd-proxy-warnings": uniqueWarnings(warnings).join("; ").slice(0, 2000) }
+}
+
+function uniqueWarnings(warnings: string[]): string[] {
+  return [...new Set(warnings)]
+}
+
+function logProxyWarnings(logger: Logger, warnings: string[]): void {
+  for (const warning of uniqueWarnings(warnings)) {
+    logger.warn({ warning }, "Anthropic compatibility warning")
+  }
 }
 
 function anthropicBetaHeaders(req: IncomingMessage): string[] {

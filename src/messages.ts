@@ -211,9 +211,13 @@ export function convertAnthropicRequestToCommandCode(
     memory?: string
     taste?: string
     betaHeaders?: string[]
+    onWarning?: (warning: string) => void
   } = {},
 ): CommandCodePayload {
-  validateAnthropicRequest(request, options.betaHeaders ?? [], { requireMaxTokens: true })
+  validateAnthropicRequest(request, options.betaHeaders ?? [], {
+    requireMaxTokens: true,
+    onWarning: options.onWarning,
+  })
   const systemParts: string[] = []
 
   // Handle system prompt
@@ -225,13 +229,13 @@ export function convertAnthropicRequestToCommandCode(
   const toolNamesByCallId = new Map<string, string>()
 
   for (const message of request.messages ?? []) {
-    appendAnthropicMessage(message, messages, toolNamesByCallId)
+    appendAnthropicMessage(message, messages, toolNamesByCallId, options.onWarning)
   }
 
   const params: CommandCodeParams = {
     model: resolveModel(request.model ?? DEFAULT_MODEL),
     messages,
-    tools: convertAnthropicTools(request.tools),
+    tools: convertAnthropicTools(request.tools, options.onWarning),
     system: systemParts.join("\n\n"),
     max_tokens: Math.min(request.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_TOKENS),
     stream: true,
@@ -283,9 +287,12 @@ export function convertAnthropicRequestToCommandCode(
 
 export function countAnthropicInputTokens(
   request: AnthropicMessageRequest,
-  options: { betaHeaders?: string[] } = {},
+  options: { betaHeaders?: string[]; onWarning?: (warning: string) => void } = {},
 ): AnthropicTokenCountResponse {
-  validateAnthropicRequest(request, options.betaHeaders ?? [], { requireMaxTokens: false })
+  validateAnthropicRequest(request, options.betaHeaders ?? [], {
+    requireMaxTokens: false,
+    onWarning: options.onWarning,
+  })
 
   let tokenCount = 0
   tokenCount += estimateTextTokens(normalizeSystem(request.system))
@@ -320,6 +327,7 @@ function appendAnthropicMessage(
   message: AnthropicMessage,
   messages: CommandCodeMessage[],
   toolNamesByCallId: Map<string, string>,
+  onWarning?: (warning: string) => void,
 ): void {
   const contentBlocks = normalizeContent(message.content)
 
@@ -335,7 +343,8 @@ function appendAnthropicMessage(
         const image = commandCodeImageContent(block.source)
         if (image) textParts.push(image)
       } else if (block.type === "document") {
-        textParts.push(documentTextContent(block))
+        const documentText = documentTextContent(block, onWarning)
+        if (documentText) textParts.push(documentText)
       } else if (block.type === "tool_result") {
         // Anthropic puts tool_result in user messages, but Command Code
         // requires them in separate role="tool" messages.
@@ -351,7 +360,7 @@ function appendAnthropicMessage(
         if (block.cache_control) result.cache_control = block.cache_control
         messages.push({ role: "tool", content: [result] })
       } else {
-        throw unsupportedContentBlock(block)
+        warnUnsupportedContentBlock(block, onWarning)
       }
     }
 
@@ -374,7 +383,7 @@ function appendAnthropicMessage(
           input: block.input,
         })
       } else {
-        throw unsupportedContentBlock(block)
+        warnUnsupportedContentBlock(block, onWarning)
       }
     }
 
@@ -395,7 +404,7 @@ function normalizeToolResultContent(content: string | AnthropicTextBlock[]): str
 function validateAnthropicRequest(
   request: AnthropicMessageRequest,
   betaHeaders: string[],
-  options: { requireMaxTokens: boolean },
+  options: { requireMaxTokens: boolean; onWarning?: ((warning: string) => void) | undefined },
 ): void {
   if (options.requireMaxTokens && typeof request.max_tokens !== "number") {
     throw new AnthropicRequestError("max_tokens is required")
@@ -412,47 +421,57 @@ function validateAnthropicRequest(
       throw new AnthropicRequestError("messages: roles must alternate between user and assistant")
     }
   }
-  assertSupportedAnthropicRequest(request, betaHeaders)
+  warnAboutUnsupportedAnthropicRequest(request, betaHeaders, options.onWarning)
 }
 
-function assertSupportedAnthropicRequest(
+function warnAboutUnsupportedAnthropicRequest(
   request: AnthropicMessageRequest,
   betaHeaders: string[],
+  onWarning?: (warning: string) => void,
 ): void {
-  assertBetaHeaderForField(request, betaHeaders, "mcp_servers", [
+  warnMissingBetaForField(request, betaHeaders, onWarning, "mcp_servers", [
     "mcp-client-2025-11-20",
     "mcp-client-2025-04-04",
   ])
-  assertBetaHeaderForField(request, betaHeaders, "context_management", [
+  warnMissingBetaForField(request, betaHeaders, onWarning, "context_management", [
     "context-management-2025-06-27",
   ])
 
-  for (const field of [
-    "container",
-    "mcp_servers",
-    "context_management",
-    "output_config",
-  ] as const) {
+  for (const field of ["container", "mcp_servers", "output_config"] as const) {
     if (request[field] !== undefined) {
-      throw new AnthropicRequestError(`Unsupported Anthropic request field: ${field}`)
+      warn(`Ignored unsupported Anthropic request field: ${field}`, onWarning)
     }
+  }
+  if (request.context_management !== undefined) {
+    warn("Ignored unsupported Anthropic request field: context_management", onWarning)
   }
 }
 
-function assertBetaHeaderForField(
+function warnMissingBetaForField(
   request: AnthropicMessageRequest,
   betaHeaders: string[],
+  onWarning: ((warning: string) => void) | undefined,
   field: keyof AnthropicMessageRequest,
   allowedBetas: string[],
 ): void {
   if (request[field] === undefined) return
   if (allowedBetas.some((beta) => betaHeaders.includes(beta))) return
-  throw new AnthropicRequestError(`${field} requires anthropic-beta: ${allowedBetas[0]}`)
+  warn(
+    `Ignored Anthropic request field ${field} because it requires anthropic-beta: ${allowedBetas[0]}`,
+    onWarning,
+  )
 }
 
-function unsupportedContentBlock(block: unknown): AnthropicRequestError {
+function warnUnsupportedContentBlock(
+  block: unknown,
+  onWarning: ((warning: string) => void) | undefined,
+): void {
   const type = isRecord(block) ? stringValue(block.type) : undefined
-  return new AnthropicRequestError(`Unsupported Anthropic content block type: ${type ?? "unknown"}`)
+  warn(`Ignored unsupported Anthropic content block type: ${type ?? "unknown"}`, onWarning)
+}
+
+function warn(message: string, onWarning: ((warning: string) => void) | undefined): void {
+  onWarning?.(message)
 }
 
 function estimateContentBlockTokens(block: AnthropicContentBlock): number {
@@ -506,7 +525,10 @@ function estimateTextTokens(text: string): number {
   return Math.max(charEstimate, asciiWords + nonAsciiChars + punctuation * 0.25)
 }
 
-function convertAnthropicTools(tools: AnthropicTool[] | undefined): CommandCodeTool[] {
+function convertAnthropicTools(
+  tools: AnthropicTool[] | undefined,
+  onWarning?: (warning: string) => void,
+): CommandCodeTool[] {
   if (!tools || !Array.isArray(tools)) return []
   const converted: CommandCodeTool[] = []
 
@@ -514,7 +536,8 @@ function convertAnthropicTools(tools: AnthropicTool[] | undefined): CommandCodeT
     if (!isRecord(tool)) continue
     const type = stringValue(tool.type)
     if (type && type !== "custom") {
-      throw new AnthropicRequestError(`Unsupported Anthropic tool type: ${type}`)
+      warn(`Ignored unsupported Anthropic tool type: ${type}`, onWarning)
+      continue
     }
     const name = stringValue(tool.name)
     if (!name) continue
@@ -561,11 +584,11 @@ function commandCodeImageContent(
 
 function documentTextContent(
   block: Extract<AnthropicContentBlock, { type: "document" }>,
-): Extract<CommandCodeContent, { type: "text" }> {
+  onWarning?: (warning: string) => void,
+): Extract<CommandCodeContent, { type: "text" }> | undefined {
   if (block.source.type !== "text") {
-    throw new AnthropicRequestError(
-      `Unsupported Anthropic document source type: ${block.source.type}`,
-    )
+    warn(`Ignored unsupported Anthropic document source type: ${block.source.type}`, onWarning)
+    return undefined
   }
   const data = stringValue(block.source.data) ?? ""
   const title = stringValue(block.title)

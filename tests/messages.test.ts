@@ -410,9 +410,10 @@ describe("convertAnthropicRequestToCommandCode", () => {
     ])
   })
 
-  it("rejects unsupported Anthropic content blocks instead of dropping them", () => {
-    expect(() =>
-      convertAnthropicRequestToCommandCode({
+  it("warns and drops unsupported Anthropic content blocks instead of blocking", () => {
+    const warnings: string[] = []
+    const result = convertAnthropicRequestToCommandCode(
+      {
         model: "claude-sonnet-4-6",
         messages: [
           {
@@ -421,8 +422,12 @@ describe("convertAnthropicRequestToCommandCode", () => {
           },
         ],
         max_tokens: 4096,
-      }),
-    ).toThrow("Unsupported Anthropic content block type: input_audio")
+      },
+      { onWarning: (warning) => warnings.push(warning) },
+    )
+
+    expect(result.params.messages).toEqual([])
+    expect(warnings).toContain("Ignored unsupported Anthropic content block type: input_audio")
   })
 
   it("requires max_tokens for Anthropic Messages requests", () => {
@@ -467,15 +472,20 @@ describe("convertAnthropicRequestToCommandCode", () => {
     ).toThrow("messages: roles must alternate between user and assistant")
   })
 
-  it("rejects unsupported Anthropic server tools instead of mis-mapping them", () => {
-    expect(() =>
-      convertAnthropicRequestToCommandCode({
+  it("warns and drops unsupported Anthropic server tools instead of blocking", () => {
+    const warnings: string[] = []
+    const result = convertAnthropicRequestToCommandCode(
+      {
         model: "claude-sonnet-4-6",
         messages: [{ role: "user", content: "search" }],
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         max_tokens: 4096,
-      }),
-    ).toThrow("Unsupported Anthropic tool type: web_search_20250305")
+      },
+      { onWarning: (warning) => warnings.push(warning) },
+    )
+
+    expect(result.params.tools).toEqual([])
+    expect(warnings).toContain("Ignored unsupported Anthropic tool type: web_search_20250305")
   })
 
   it("forwards lightweight Anthropic request metadata and service tier", () => {
@@ -491,29 +501,60 @@ describe("convertAnthropicRequestToCommandCode", () => {
     expect(result.params.service_tier).toBe("standard_only")
   })
 
-  it("rejects upstream-dependent Anthropic native request fields explicitly", () => {
-    expect(() =>
-      convertAnthropicRequestToCommandCode({
+  it("warns and ignores upstream-dependent Anthropic native request fields", () => {
+    const warnings: string[] = []
+    const result = convertAnthropicRequestToCommandCode(
+      {
         model: "claude-sonnet-4-6",
         messages: [{ role: "user", content: "hi" }],
         mcp_servers: [{ type: "url", url: "https://mcp.example" }],
         max_tokens: 4096,
-      }),
-    ).toThrow("mcp_servers requires anthropic-beta: mcp-client-2025-11-20")
+      },
+      { onWarning: (warning) => warnings.push(warning) },
+    )
+
+    expect(result.params.messages[0]?.role).toBe("user")
+    expect(warnings).toContain(
+      "Ignored Anthropic request field mcp_servers because it requires anthropic-beta: mcp-client-2025-11-20",
+    )
   })
 
-  it("distinguishes enabled beta fields from implemented beta fields", () => {
-    expect(() =>
-      convertAnthropicRequestToCommandCode(
-        {
-          model: "claude-sonnet-4-6",
-          messages: [{ role: "user", content: "hi" }],
-          mcp_servers: [{ type: "url", url: "https://mcp.example" }],
-          max_tokens: 4096,
+  it("warns when beta fields are enabled but not implemented", () => {
+    const warnings: string[] = []
+    const result = convertAnthropicRequestToCommandCode(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+        mcp_servers: [{ type: "url", url: "https://mcp.example" }],
+        max_tokens: 4096,
+      },
+      { betaHeaders: ["mcp-client-2025-11-20"], onWarning: (warning) => warnings.push(warning) },
+    )
+
+    expect(result.params.messages[0]?.role).toBe("user")
+    expect(warnings).toContain("Ignored unsupported Anthropic request field: mcp_servers")
+  })
+
+  it("accepts context_management when the Anthropic beta is enabled", () => {
+    const result = convertAnthropicRequestToCommandCode(
+      {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+        context_management: {
+          edits: [
+            {
+              type: "clear_tool_uses_20250919",
+              trigger: { type: "input_tokens", value: 30000 },
+              keep: { type: "tool_uses", value: 5 },
+            },
+          ],
         },
-        { betaHeaders: ["mcp-client-2025-11-20"] },
-      ),
-    ).toThrow("Unsupported Anthropic request field: mcp_servers")
+        max_tokens: 4096,
+      },
+      { betaHeaders: ["context-management-2025-06-27"] },
+    )
+
+    expect(result.params.messages[0]?.role).toBe("user")
   })
 
   it("preserves cache_control on text blocks, tool results, and tools", () => {

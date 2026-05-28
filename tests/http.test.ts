@@ -510,7 +510,7 @@ describe("createProxyServer", () => {
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 
-  it("applies Anthropic beta gates to token counting requests", async () => {
+  it("warns and estimates token counts when beta request fields are unsupported", async () => {
     const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
 
     const { res, result } = mockResponse()
@@ -541,14 +541,11 @@ describe("createProxyServer", () => {
     )
 
     const r = result()
-    expect(r.status).toBe(400)
-    expect(JSON.parse(r.body)).toMatchObject({
-      type: "error",
-      error: {
-        type: "invalid_request_error",
-        message: "context_management requires anthropic-beta: context-management-2025-06-27",
-      },
-    })
+    expect(r.status).toBe(200)
+    expect(r.headers["x-cmd-proxy-warnings"]).toContain(
+      "Ignored Anthropic request field context_management because it requires anthropic-beta: context-management-2025-06-27",
+    )
+    expect(JSON.parse(r.body)).toMatchObject({ input_tokens: expect.any(Number) })
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 
@@ -625,8 +622,13 @@ describe("createProxyServer", () => {
     }
   })
 
-  it("returns Anthropic 400 for unsupported Anthropic server tools", async () => {
-    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+  it("warns and continues for unsupported Anthropic server tools", async () => {
+    const fetchImpl = vi.fn(async () =>
+      commandCodeResponse([
+        JSON.stringify({ type: "text-delta", text: "search unavailable" }),
+        JSON.stringify({ type: "finish", finishReason: "stop" }),
+      ]),
+    ) as typeof fetch
 
     const { res, result } = mockResponse()
     await handleRequest(
@@ -638,6 +640,7 @@ describe("createProxyServer", () => {
           messages: [{ role: "user", content: "search" }],
           tools: [{ type: "web_search_20250305", name: "web_search" }],
           max_tokens: 4096,
+          stream: false,
         }),
         { "x-api-key": "dummy", "anthropic-version": "2023-06-01" },
       ),
@@ -648,15 +651,16 @@ describe("createProxyServer", () => {
       null,
     )
 
-    expect(result().status).toBe(400)
-    expect(JSON.parse(result().body)).toEqual({
-      type: "error",
-      error: {
-        type: "invalid_request_error",
-        message: "Unsupported Anthropic tool type: web_search_20250305",
-      },
+    const r = result()
+    expect(r.status).toBe(200)
+    expect(r.headers["x-cmd-proxy-warnings"]).toContain(
+      "Ignored unsupported Anthropic tool type: web_search_20250305",
+    )
+    expect(JSON.parse(r.body)).toMatchObject({
+      type: "message",
+      content: [{ type: "text", text: "search unavailable" }],
     })
-    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalled()
   })
 
   it("preserves Anthropic version and beta headers on Messages responses", async () => {
@@ -724,21 +728,23 @@ describe("createProxyServer", () => {
     )
 
     const r = result()
-    expect(r.status).toBe(400)
+    expect(r.status).toBe(200)
     expect(r.headers["anthropic-version"]).toBe("2023-06-01")
     expect(r.headers["anthropic-beta"]).toBe("claude-code-20250219")
     expect(r.headers["request-id"]).toMatch(/^req_/)
-    expect(JSON.parse(r.body)).toMatchObject({
-      type: "error",
-      error: {
-        type: "invalid_request_error",
-        message: "Unsupported Anthropic content block type: input_audio",
-      },
-    })
+    expect(r.headers["x-cmd-proxy-warnings"]).toContain(
+      "Ignored unsupported Anthropic content block type: input_audio",
+    )
+    expect(fetchImpl).toHaveBeenCalled()
   })
 
-  it("requires Anthropic beta headers for gated beta request fields", async () => {
-    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+  it("warns and continues when beta headers are missing for unsupported beta request fields", async () => {
+    const fetchImpl = vi.fn(async () =>
+      commandCodeResponse([
+        JSON.stringify({ type: "text-delta", text: "hi" }),
+        JSON.stringify({ type: "finish", finishReason: "stop" }),
+      ]),
+    ) as typeof fetch
 
     const { res, result } = mockResponse()
     await handleRequest(
@@ -761,15 +767,11 @@ describe("createProxyServer", () => {
     )
 
     const r = result()
-    expect(r.status).toBe(400)
-    expect(JSON.parse(r.body)).toMatchObject({
-      type: "error",
-      error: {
-        type: "invalid_request_error",
-        message: "mcp_servers requires anthropic-beta: mcp-client-2025-11-20",
-      },
-    })
-    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(r.status).toBe(200)
+    expect(r.headers["x-cmd-proxy-warnings"]).toContain(
+      "Ignored Anthropic request field mcp_servers because it requires anthropic-beta: mcp-client-2025-11-20",
+    )
+    expect(fetchImpl).toHaveBeenCalled()
   })
 
   it("parses comma separated Anthropic beta headers before beta feature checks", async () => {
@@ -799,11 +801,64 @@ describe("createProxyServer", () => {
     )
 
     const r = result()
-    expect(r.status).toBe(400)
+    expect(r.status).toBe(200)
+    expect(r.headers["x-cmd-proxy-warnings"]).toContain(
+      "Ignored unsupported Anthropic request field: mcp_servers",
+    )
+  })
+
+  it("accepts context_management on Messages requests when the Anthropic beta is enabled", async () => {
+    let capturedPayload: unknown
+    const fetchImpl = ((_input, init) => {
+      capturedPayload = JSON.parse((init?.body ?? "{}") as string)
+      return Promise.resolve(
+        commandCodeResponse([
+          JSON.stringify({ type: "text-delta", text: "hello" }),
+          JSON.stringify({ type: "finish", finishReason: "stop" }),
+        ]),
+      )
+    }) satisfies typeof fetch
+
+    const { res, result } = mockResponse()
+    await handleRequest(
+      mockReq(
+        "POST",
+        "/v1/messages",
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          messages: [{ role: "user", content: "hi" }],
+          context_management: {
+            edits: [
+              {
+                type: "clear_tool_uses_20250919",
+                trigger: { type: "input_tokens", value: 30000 },
+                keep: { type: "tool_uses", value: 5 },
+              },
+            ],
+          },
+          max_tokens: 4096,
+          stream: false,
+        }),
+        {
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "context-management-2025-06-27",
+        },
+      ),
+      res,
+      mockConfig(),
+      logger,
+      fetchImpl,
+      null,
+    )
+
+    const r = result()
+    expect(r.status).toBe(200)
     expect(JSON.parse(r.body)).toMatchObject({
-      type: "error",
-      error: { message: "Unsupported Anthropic request field: mcp_servers" },
+      type: "message",
+      content: [{ type: "text", text: "hello" }],
     })
+    const payload = capturedPayload as { params?: { messages?: unknown[] } } | undefined
+    expect(payload?.params?.messages).toHaveLength(1)
   })
 
   it("forwards matching x-api-key to upstream in pass_through mode", async () => {
@@ -1077,8 +1132,13 @@ describe("createProxyServer", () => {
     })
   })
 
-  it("returns 400 for unsupported OpenAI Responses built-in tools", async () => {
-    const fetchImpl = vi.fn(async () => commandCodeResponse([])) as typeof fetch
+  it("warns and continues for unsupported OpenAI Responses built-in tools", async () => {
+    const fetchImpl = vi.fn(async () =>
+      commandCodeResponse([
+        JSON.stringify({ type: "text-delta", text: "search unavailable" }),
+        JSON.stringify({ type: "finish", finishReason: "stop" }),
+      ]),
+    ) as typeof fetch
 
     const { res, result } = mockResponse()
     await handleRequest(
@@ -1089,6 +1149,7 @@ describe("createProxyServer", () => {
           model: "deepseek-v4-pro",
           input: "hi",
           tools: [{ type: "web_search_preview" }],
+          stream: false,
         }),
       ),
       res,
@@ -1098,15 +1159,16 @@ describe("createProxyServer", () => {
       null,
     )
 
-    expect(result().status).toBe(400)
-    expect(JSON.parse(result().body)).toMatchObject({
-      error: {
-        type: "invalid_request_error",
-        code: "unsupported_tool",
-        param: "tools",
-      },
+    const r = result()
+    expect(r.status).toBe(200)
+    expect(r.headers["x-cmd-proxy-warnings"]).toContain(
+      "Ignored unsupported OpenAI Responses tool type: web_search_preview",
+    )
+    expect(JSON.parse(r.body)).toMatchObject({
+      object: "response",
+      output: [{ type: "message", content: [{ type: "output_text", text: "search unavailable" }] }],
     })
-    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalled()
   })
 
   it("passes upstream 5xx errors as server_error", async () => {
