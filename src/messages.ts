@@ -516,8 +516,12 @@ function validateAnthropicRequest(
     throw new AnthropicRequestError("messages: first message must use the user role")
   }
   for (let i = 1; i < request.messages.length; i += 1) {
-    if (request.messages[i]?.role === request.messages[i - 1]?.role) {
-      throw new AnthropicRequestError("messages: roles must alternate between user and assistant")
+    const currentRole = request.messages[i]?.role
+    if (currentRole === request.messages[i - 1]?.role) {
+      warn(
+        `Accepted consecutive Anthropic ${currentRole ?? "unknown"} messages without blocking`,
+        options.onWarning,
+      )
     }
   }
   warnAboutUnsupportedAnthropicRequest(request, betaHeaders, options.onWarning)

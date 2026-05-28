@@ -519,17 +519,25 @@ describe("convertAnthropicRequestToCommandCode", () => {
     ).toThrow("messages: first message must use the user role")
   })
 
-  it("requires Anthropic message roles to alternate", () => {
-    expect(() =>
-      convertAnthropicRequestToCommandCode({
+  it("warns but allows consecutive Anthropic message roles", () => {
+    const warnings: string[] = []
+    const result = convertAnthropicRequestToCommandCode(
+      {
         model: "claude-sonnet-4-6",
         messages: [
           { role: "user", content: "one" },
           { role: "user", content: "two" },
         ],
         max_tokens: 4096,
-      }),
-    ).toThrow("messages: roles must alternate between user and assistant")
+      },
+      { onWarning: (warning) => warnings.push(warning) },
+    )
+
+    expect(result.params.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "one" }] },
+      { role: "user", content: [{ type: "text", text: "two" }] },
+    ])
+    expect(warnings).toContain("Accepted consecutive Anthropic user messages without blocking")
   })
 
   it("maps built-in Anthropic web_search tool as function tool to upstream", () => {

@@ -1,18 +1,18 @@
 # cmd-proxy
 
-一个本地协议转换代理，将 OpenAI / Anthropic 兼容客户端的请求转换为 CommandCode 上游 API 格式，并实时转换流式响应。
+一个本地协议转换代理，将 OpenAI / Anthropic 兼容客户端的请求转换为上游 API 格式，并实时转换流式响应。
 
 同时提供 OpenAI Responses API、Chat Completions API 和 Anthropic Messages API 三种协议，方便各类兼容工具接入。
 
 ## 项目定位
 
-这是一个面向个人使用的 **Codex / Claude Code 到 CommandCode 的高容错适配器**。
+这是一个面向个人使用的 **Codex / Claude Code 到 上游 API 的高容错适配器**。
 
 目标：
 
-- 让 Codex、Claude Code 等客户端尽量顺滑地使用 CommandCode 上游模型。
-- 对上游不支持的协议能力优先 warning 降级，避免阻断主流程。
-- 保留 OpenAI / Anthropic 常用协议形状，覆盖日常读代码、改代码、跑测试、工具调用等开发任务。
+  - 让 Codex、Claude Code 等客户端尽量顺滑地使用上游 API 模型。
+  - 对上游不支持的协议能力优先 warning 降级，避免阻断主流程。
+  - 保留 OpenAI / Anthropic 常用协议形状，覆盖日常读代码、改代码、跑测试、工具调用等开发任务。
 
 非目标：
 
@@ -168,7 +168,7 @@ CMD_API_KEY="user_..." pnpm dev
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CMD_API_KEY` | 无 | 上游 API key，必填 |
-| `CMD_API_BASE` | `https://api.commandcode.ai` | 上游 API 地址 |
+| `CMD_API_BASE` | `https://api.example.ai` | 上游 API 地址 |
 | `CMD_PROXY_PORT` | `8888` | 本地监听端口 |
 | `CMD_PROXY_AUTH_MODE` | `pass_through` | 鉴权策略：`pass_through`、`fixed`、`none` |
 | `CMD_PROXY_UPSTREAM_TIMEOUT_MS` | `300000` | 上游请求超时（毫秒），默认 5 分钟 |
@@ -186,7 +186,7 @@ CMD_API_KEY="user_..." pnpm dev
 | `CMD_PROXY_MAX_TOKENS_CAP` | `200000` | 所有请求的最大 token 上限 |
 | `CMD_PROXY_ANTHROPIC_API_VERSION` | `2023-06-01` | 默认 Anthropic API version 响应头 |
 | `CMD_PROXY_UPSTREAM_PATH` | `/alpha/generate` | 上游 generate endpoint path |
-| `CMD_PROXY_MODEL_OWNED_BY` | `commandcode` | `/v1/models` 返回的 `owned_by` 字段 |
+| `CMD_PROXY_MODEL_OWNED_BY` | `example` | `/v1/models` 返回的 `owned_by` 字段 |
 
 ## Codex 用法
 
