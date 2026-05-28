@@ -1,4 +1,7 @@
 const DEFAULT_MODEL_MAP: Record<string, string> = {
+  "claude-opus-4-7": "deepseek/deepseek-v4-pro",
+  "claude-sonnet-4-6": "deepseek/deepseek-v4-pro",
+  "claude-haiku-4-5": "deepseek/deepseek-v4-flash",
   "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
   "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
   "kimi-k2.6": "moonshotai/Kimi-K2.6",
