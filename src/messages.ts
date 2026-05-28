@@ -31,6 +31,14 @@ export interface AnthropicThinkingConfig {
   budget_tokens: number
 }
 
+export interface AnthropicOutputConfig {
+  type: "thinking" | "text" | "assistant_message" | "json_object"
+  thinking?: {
+    type: "enabled"
+    budget_tokens: number
+  }
+}
+
 class AnthropicRequestError extends Error {
   readonly status: number
   readonly type: string
@@ -61,7 +69,7 @@ export interface AnthropicMessageRequest {
   container?: unknown
   mcp_servers?: unknown
   context_management?: unknown
-  output_config?: unknown
+  output_config?: AnthropicOutputConfig
 }
 
 export type AnthropicMessage =
@@ -255,8 +263,13 @@ export function convertAnthropicRequestToCommandCode(
     params.tool_choice = mapToolChoice(request.tool_choice)
   }
 
-  // Map Anthropic thinking config
-  if (request.thinking) {
+  // Map Anthropic thinking config (output_config takes priority)
+  if (request.output_config?.type === "thinking" && request.output_config.thinking) {
+    params.thinking = {
+      type: "enabled",
+      budget_tokens: request.output_config.thinking.budget_tokens,
+    }
+  } else if (request.thinking) {
     params.thinking = {
       type: "enabled",
       budget_tokens: request.thinking.budget_tokens,
@@ -437,7 +450,7 @@ function warnAboutUnsupportedAnthropicRequest(
     "context-management-2025-06-27",
   ])
 
-  for (const field of ["container", "mcp_servers", "output_config"] as const) {
+  for (const field of ["container", "mcp_servers"] as const) {
     if (request[field] !== undefined) {
       warn(`Ignored unsupported Anthropic request field: ${field}`, onWarning)
     }
