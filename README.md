@@ -1,8 +1,26 @@
 # cmd-proxy
 
-一个本地协议转换代理，将 OpenAI 兼容客户端的请求转换为上游 API 格式，并实时转换流式响应。
+一个本地协议转换代理，将 OpenAI / Anthropic 兼容客户端的请求转换为 CommandCode 上游 API 格式，并实时转换流式响应。
 
 同时提供 OpenAI Responses API、Chat Completions API 和 Anthropic Messages API 三种协议，方便各类兼容工具接入。
+
+## 项目定位
+
+这是一个面向个人使用的 **Codex / Claude Code 到 CommandCode 的高容错适配器**。
+
+目标：
+
+- 让 Codex、Claude Code 等客户端尽量顺滑地使用 CommandCode 上游模型。
+- 对上游不支持的协议能力优先 warning 降级，避免阻断主流程。
+- 保留 OpenAI / Anthropic 常用协议形状，覆盖日常读代码、改代码、跑测试、工具调用等开发任务。
+
+非目标：
+
+- 不追求 100% 替代 OpenAI / Anthropic 官方 API。
+- 不提供 LiteLLM 这类通用网关能力，例如多租户、成本控制、限流、预算、管理后台。
+- 不完整实现 Anthropic 原生后端能力，例如 MCP connector、Files、PDF citations、官方 tokenizer、真实 prompt caching。
+
+当前状态建议视为 **personal MVP / alpha-stable**：适合个人真实任务试用；公开稳定版或团队生产使用前，建议补充真实客户端回放测试。
 
 ## 架构
 
@@ -150,11 +168,25 @@ CMD_API_KEY="user_..." pnpm dev
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CMD_API_KEY` | 无 | 上游 API key，必填 |
-| `CMD_API_BASE` | `https://api.example.ai` | 上游 API 地址 |
+| `CMD_API_BASE` | `https://api.commandcode.ai` | 上游 API 地址 |
 | `CMD_PROXY_PORT` | `8888` | 本地监听端口 |
 | `CMD_PROXY_AUTH_MODE` | `pass_through` | 鉴权策略：`pass_through`、`fixed`、`none` |
 | `CMD_PROXY_UPSTREAM_TIMEOUT_MS` | `300000` | 上游请求超时（毫秒），默认 5 分钟 |
 | `LOG_LEVEL` | `info` | `fatal`、`error`、`warn`、`info`、`debug`、`trace`、`silent` |
+| `CMD_PROXY_MEMORY` | 空 | 注入到上游请求的 memory 字段 |
+| `CMD_PROXY_TASTE` | 空 | 注入到上游请求的 taste 字段 |
+| `CMD_PROXY_CLI_VERSION` | `0.24.1` | 发送给上游的 CLI 版本标识 |
+| `CMD_PROXY_CLI_ENVIRONMENT` | `production` | 发送给上游的 CLI 环境标识 |
+| `CMD_PROXY_TASTE_LEARNING` | `false` | 发送给上游的 taste learning 标识 |
+| `CMD_PROXY_CO_FLAG` | `false` | 发送给上游的 co flag 标识 |
+| `CMD_PROXY_MODEL_MAP` | 空 | 自定义模型映射，格式：`alias=provider/model;alias2=provider/model2` |
+| `CMD_PROXY_DEFAULT_MODEL` | `deepseek-v4-pro` | 客户端未指定模型时使用的默认模型 |
+| `CMD_PROXY_MAX_TOKENS` | `32000` | Chat Completions / Responses 默认输出 token |
+| `CMD_PROXY_MAX_TOKENS_ANTHROPIC` | `4096` | Anthropic Messages 默认输出 token |
+| `CMD_PROXY_MAX_TOKENS_CAP` | `200000` | 所有请求的最大 token 上限 |
+| `CMD_PROXY_ANTHROPIC_API_VERSION` | `2023-06-01` | 默认 Anthropic API version 响应头 |
+| `CMD_PROXY_UPSTREAM_PATH` | `/alpha/generate` | 上游 generate endpoint path |
+| `CMD_PROXY_MODEL_OWNED_BY` | `commandcode` | `/v1/models` 返回的 `owned_by` 字段 |
 
 ## Codex 用法
 
@@ -262,6 +294,18 @@ pnpm test
 - Anthropic `message_start.usage` 只有在上游先发送 `usage-start`/`usage` 事件时才可准确；若上游只在 finish 事件返回 usage，最终 response usage 准确，但 `message_start` 会先显示 0。
 - Anthropic extended thinking 的 `signature_delta` 依赖上游提供 `reasoning-signature-delta` 或 `reasoning-end.signature`；未提供时无法完整模拟官方签名。
 - `n > 1`（多选）、`logprobs`、`logit_bias` 暂不转发（上游不支持）。
+
+## 交付验收建议
+
+不要用“是否 100% 兼容官方 API”作为验收标准。推荐用真实客户端跑下面几类任务：
+
+1. Claude Code 读取一个文件并解释。
+2. Claude Code 修改一个小 bug。
+3. Claude Code 添加或修复一个测试。
+4. Codex 通过 Responses API 完成一次小型代码修改。
+5. 出现不支持字段时，请求不中断，并在 `x-cmd-proxy-warnings` 中看到 warning。
+
+如果这些主流程稳定，当前版本即可作为个人使用交付；后续只建议修阻断型问题。
 
 ## Docker 部署
 

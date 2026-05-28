@@ -3,7 +3,7 @@ FROM node:22-alpine
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
-RUN corepack enable && corepack prepare pnpm@latest --activate && pnpm install --ignore-scripts && pnpm rebuild esbuild
+RUN corepack enable && corepack prepare pnpm@10.33.2 --activate && pnpm install --ignore-scripts && pnpm rebuild esbuild
 
 COPY . .
 
