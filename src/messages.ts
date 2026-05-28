@@ -1186,6 +1186,11 @@ function buildAnthropicUsage(state: AnthropicState): AnthropicUsage {
 }
 
 function buildFinalResponse(state: AnthropicState): AnthropicMessageResponse {
+  // Ensure message_start is always emitted, even with empty content
+  if (!state.sentStart) {
+    ensureStart(state)
+  }
+
   // Close any open blocks
   if (!state.finished) {
     closeTextBlock(state)
