@@ -622,10 +622,10 @@ describe("createProxyServer", () => {
     }
   })
 
-  it("warns and continues for unsupported Anthropic server tools", async () => {
+  it("maps built-in Anthropic web_search tool as function tool to upstream", async () => {
     const fetchImpl = vi.fn(async () =>
       commandCodeResponse([
-        JSON.stringify({ type: "text-delta", text: "search unavailable" }),
+        JSON.stringify({ type: "text-delta", text: "search result" }),
         JSON.stringify({ type: "finish", finishReason: "stop" }),
       ]),
     ) as typeof fetch
@@ -653,12 +653,9 @@ describe("createProxyServer", () => {
 
     const r = result()
     expect(r.status).toBe(200)
-    expect(r.headers["x-cmd-proxy-warnings"]).toContain(
-      "Ignored unsupported Anthropic tool type: web_search_20250305",
-    )
     expect(JSON.parse(r.body)).toMatchObject({
       type: "message",
-      content: [{ type: "text", text: "search unavailable" }],
+      content: [{ type: "text", text: "search result" }],
     })
     expect(fetchImpl).toHaveBeenCalled()
   })

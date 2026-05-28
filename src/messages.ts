@@ -563,7 +563,19 @@ function convertAnthropicTools(
     if (!isRecord(tool)) continue
     const type = stringValue(tool.type)
     if (type && type !== "custom") {
-      warn(`Ignored unsupported Anthropic tool type: ${type}`, onWarning)
+      const builtinSchema = getBuiltinToolSchema(type, tool)
+      if (!builtinSchema) {
+        warn(`Ignored unsupported Anthropic tool type: ${type}`, onWarning)
+        continue
+      }
+      const commandCodeTool: CommandCodeTool = {
+        type: "function",
+        name: builtinSchema.name,
+        input_schema: builtinSchema.input_schema,
+        description: builtinSchema.description,
+      }
+      if (tool.cache_control) commandCodeTool.cache_control = tool.cache_control
+      converted.push(commandCodeTool)
       continue
     }
     const name = stringValue(tool.name)
@@ -583,6 +595,77 @@ function convertAnthropicTools(
   }
 
   return converted
+}
+
+function getBuiltinToolSchema(
+  type: string,
+  _tool: AnthropicTool,
+): { name: string; input_schema: Record<string, unknown>; description: string } | undefined {
+  if (type === "web_search_20250305") {
+    return {
+      name: "web_search",
+      description: "Search the web for current information.",
+      input_schema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "The search query" },
+        },
+        required: ["query"],
+      },
+    }
+  }
+  if (type === "text_editor_20250124") {
+    return {
+      name: "text_editor",
+      description: "View or edit a file in the workspace.",
+      input_schema: {
+        type: "object",
+        properties: {
+          command: {
+            type: "string",
+            enum: ["view", "create", "str_replace", "insert", "undo_edit"],
+          },
+          path: { type: "string" },
+          file_text: { type: "string" },
+          insert_line: { type: "number" },
+          new_str: { type: "string" },
+          old_str: { type: "string" },
+          view_range: { type: "array", items: { type: "number" } },
+        },
+        required: ["command", "path"],
+      },
+    }
+  }
+  if (type === "computer_20250124") {
+    return {
+      name: "computer",
+      description: "Interact with a computer desktop through mouse and keyboard actions.",
+      input_schema: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: [
+              "key",
+              "type",
+              "mouse_move",
+              "left_click",
+              "left_click_drag",
+              "right_click",
+              "middle_click",
+              "double_click",
+              "screenshot",
+              "cursor_position",
+            ],
+          },
+          coordinate: { type: "array", items: { type: "number" } },
+          text: { type: "string" },
+        },
+        required: ["action"],
+      },
+    }
+  }
+  return undefined
 }
 
 export function isAnthropicRequestError(error: unknown): error is AnthropicRequestError {

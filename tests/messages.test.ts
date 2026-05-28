@@ -472,20 +472,26 @@ describe("convertAnthropicRequestToCommandCode", () => {
     ).toThrow("messages: roles must alternate between user and assistant")
   })
 
-  it("warns and drops unsupported Anthropic server tools instead of blocking", () => {
-    const warnings: string[] = []
-    const result = convertAnthropicRequestToCommandCode(
-      {
-        model: "claude-sonnet-4-6",
-        messages: [{ role: "user", content: "search" }],
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        max_tokens: 4096,
-      },
-      { onWarning: (warning) => warnings.push(warning) },
-    )
+  it("maps built-in Anthropic web_search tool as function tool to upstream", () => {
+    const result = convertAnthropicRequestToCommandCode({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "search" }],
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      max_tokens: 4096,
+    })
 
-    expect(result.params.tools).toEqual([])
-    expect(warnings).toContain("Ignored unsupported Anthropic tool type: web_search_20250305")
+    expect(result.params.tools).toEqual([
+      {
+        type: "function",
+        name: "web_search",
+        description: "Search the web for current information.",
+        input_schema: {
+          type: "object",
+          properties: { query: { type: "string", description: "The search query" } },
+          required: ["query"],
+        },
+      },
+    ])
   })
 
   it("forwards lightweight Anthropic request metadata and service tier", () => {
